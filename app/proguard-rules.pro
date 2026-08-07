@@ -1,0 +1,1 @@
+-keep class com.dan.anchor.block.BlockerService { *; }

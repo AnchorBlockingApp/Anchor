@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Android needs at least one declared policy or it refuses to show the approval
+  screen at all. force-lock is the mildest available — it would let Anchor lock
+  the screen — and Anchor never calls it. Nothing here can wipe the device,
+  change your password, or read anything.
+-->
+<device-admin xmlns:android="http://schemas.android.com/apk/res/android">
+    <uses-policies>
+        <force-lock />
+    </uses-policies>
+</device-admin>

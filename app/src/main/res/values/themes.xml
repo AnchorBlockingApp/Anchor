@@ -1,0 +1,11 @@
+<resources>
+    <style name="Theme.Anchor" parent="android:Theme.Material.NoActionBar">
+        <item name="android:statusBarColor">#FF08090A</item>
+        <item name="android:navigationBarColor">#FF08090A</item>
+        <item name="android:windowBackground">#FF08090A</item>
+    </style>
+
+    <style name="Theme.Anchor.Block" parent="Theme.Anchor">
+        <item name="android:windowAnimationStyle">@null</item>
+    </style>
+</resources>

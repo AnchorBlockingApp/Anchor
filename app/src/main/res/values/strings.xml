@@ -1,0 +1,7 @@
+<resources>
+    <string name="app_name">Anchor</string>
+    <string name="service_label">Anchor blocking</string>
+    <string name="service_description">Anchor watches which app or website is on screen so it can show you a verse instead of a distraction. Nothing is uploaded — it all stays on this phone.</string>
+    <string name="admin_label">Anchor uninstall protection</string>
+    <string name="admin_description">Stops Anchor being uninstalled while your blocks are active. Anchor asks for no other administrator powers — it can\'t lock your screen, change your password, or wipe the device.</string>
+</resources>
