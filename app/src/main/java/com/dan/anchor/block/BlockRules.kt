@@ -88,6 +88,19 @@ object BlockRules {
         return u.substringBefore(':')
     }
 
+    /**
+     * Every domain that would count as a match for this host: itself, then each
+     * parent up to the registrable name. Lets a blocklist be checked with a
+     * handful of hash lookups instead of walking all hundred thousand entries
+     * and doing string surgery on each — which is what this used to do, twice a
+     * second, while you browsed.
+     */
+    private fun domainSuffixes(host: String): List<String> {
+        val parts = host.split('.')
+        if (parts.size < 2) return listOf(host)
+        return (0..parts.size - 2).map { i -> parts.subList(i, parts.size).joinToString(".") }
+    }
+
     private fun hostMatches(host: String, pattern: String): Boolean {
         val p = pattern.lowercase().removePrefix("www.")
         return host == p || host.endsWith(".$p")
@@ -120,10 +133,12 @@ object BlockRules {
             val full = rawUrl.lowercase()
             val isSearch = SEARCH_HOSTS.any { h.contains(it) }
 
-            if (ADULT_SEED.any { hostMatches(h, it) }) {
+            val suffixes = domainSuffixes(h)
+            if (suffixes.any { ADULT_SEED.contains(it) }) {
                 return Decision.Block("", Decision.Reason.ADULT)
             }
-            if (prefs.importedDomains.any { hostMatches(h, it) }) {
+            val imported = prefs.importedDomains
+            if (imported.isNotEmpty() && suffixes.any { imported.contains(it) }) {
                 return Decision.Block("", Decision.Reason.ADULT)
             }
             // On a search engine, check the query. Elsewhere, check the hostname
@@ -137,7 +152,40 @@ object BlockRules {
         return Decision.Allow
     }
 
+    @Volatile private var cachedClockMinute: Long = -1L
+    @Volatile private var cachedDayMinute: Pair<Int, Int> = 1 to 0
+
+    /**
+     * Now, as Anchor's schedules understand it: 1=Monday..7=Sunday. Cached to
+     * the minute — building a Calendar once a second to ask a question whose
+     * answer changes once a minute is wasted work.
+     */
+    private fun nowDayAndMinute(): Pair<Int, Int> {
+        val minuteStamp = System.currentTimeMillis() / 60_000L
+        if (minuteStamp == cachedClockMinute) return cachedDayMinute
+
+        val c = java.util.Calendar.getInstance()
+        val dow = when (c.get(java.util.Calendar.DAY_OF_WEEK)) {
+            java.util.Calendar.MONDAY -> 1
+            java.util.Calendar.TUESDAY -> 2
+            java.util.Calendar.WEDNESDAY -> 3
+            java.util.Calendar.THURSDAY -> 4
+            java.util.Calendar.FRIDAY -> 5
+            java.util.Calendar.SATURDAY -> 6
+            else -> 7
+        }
+        val minute = c.get(java.util.Calendar.HOUR_OF_DAY) * 60 + c.get(java.util.Calendar.MINUTE)
+        cachedClockMinute = minuteStamp
+        cachedDayMinute = dow to minute
+        return cachedDayMinute
+    }
+
     private fun verdictFor(prefs: Prefs, rule: Rule): Decision {
+        rule.schedule?.let { sc ->
+            val (dow, minute) = nowDayAndMinute()
+            if (!sc.activeAt(dow, minute)) return Decision.Allow
+        }
+
         if (rule.isHardBlock) return Decision.Block(rule.publicLabel, Decision.Reason.RULE)
         val used = prefs.usedMinutes(rule.target)
         return if (used >= rule.limitMinutes) {

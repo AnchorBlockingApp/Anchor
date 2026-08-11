@@ -35,4 +35,18 @@ object Watch {
         lastUrl = ""
         lastUrlSource = ""
     }
+
+    /**
+     * The address and the decision are diagnostics, not a log — but while they
+     * sit here anyone who taps Details can see the last site that was visited.
+     * They expire so the panel can't become an accidental history.
+     */
+    private const val LIFETIME_MS = 90_000L
+
+    private fun fresh() = System.currentTimeMillis() - lastEventAt < LIFETIME_MS
+
+    fun urlForDisplay(): String = if (fresh()) lastUrl else ""
+    fun sourceForDisplay(): String = if (fresh()) lastUrlSource else ""
+    fun decisionForDisplay(): String = if (fresh()) lastDecision else ""
+    fun packageForDisplay(): String = if (fresh()) lastPackage else ""
 }

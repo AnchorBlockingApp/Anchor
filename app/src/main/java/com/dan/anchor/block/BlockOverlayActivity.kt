@@ -10,6 +10,7 @@ import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.MaterialTheme
@@ -63,10 +64,24 @@ class BlockOverlayActivity : ComponentActivity() {
                     label = label,
                     reason = reason,
                     pauseSeconds = prefs.pauseSeconds,
-                    onDismiss = { goHome() }
+                    onDismiss = { goHome() },
+                    onOpenPassage = { openPassage(verse.book, verse.chapter, verse.verseStart) }
                 )
             }
         }
+    }
+
+    /** Opens the reader at this passage instead of just sending you away. */
+    private fun openPassage(book: String, chapter: Int, verse: Int) {
+        startActivity(
+            Intent(this, com.dan.anchor.MainActivity::class.java).apply {
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP)
+                putExtra(EXTRA_OPEN_BOOK, book)
+                putExtra(EXTRA_OPEN_CHAPTER, chapter)
+                putExtra(EXTRA_OPEN_VERSE, verse)
+            }
+        )
+        finish()
     }
 
     private fun goHome() {
@@ -85,9 +100,35 @@ class BlockOverlayActivity : ComponentActivity() {
         finish()
     }
 
+    override fun onResume() {
+        super.onResume()
+        showing = true
+    }
+
+    override fun onPause() {
+        super.onPause()
+        showing = false
+    }
+
+    override fun onDestroy() {
+        showing = false
+        super.onDestroy()
+    }
+
     companion object {
         const val EXTRA_LABEL = "label"
         const val EXTRA_REASON = "reason"
+        const val EXTRA_OPEN_BOOK = "open_book"
+        const val EXTRA_OPEN_CHAPTER = "open_chapter"
+        const val EXTRA_OPEN_VERSE = "open_verse"
+
+        /**
+         * The service polls once a second and can't read the address bar while
+         * this screen covers it, so without this it re-blocks the cached URL,
+         * relaunches, and hands out a different verse every few seconds.
+         */
+        @Volatile var showing: Boolean = false
+            private set
     }
 }
 
@@ -97,7 +138,8 @@ private fun BlockScreen(
     label: String,
     reason: String,
     pauseSeconds: Int,
-    onDismiss: () -> Unit
+    onDismiss: () -> Unit,
+    onOpenPassage: () -> Unit
 ) {
     var elapsed by remember { mutableIntStateOf(0) }
     val done = elapsed >= pauseSeconds
@@ -141,7 +183,12 @@ private fun BlockScreen(
 
             Spacer(Modifier.height(28.dp))
 
-            Row(verticalAlignment = Alignment.CenterVertically) {
+            // The whole Bible is sitting in the app; there should be a way from
+            // the verse to the passage around it.
+            Row(
+                Modifier.clickable { onOpenPassage() },
+                verticalAlignment = Alignment.CenterVertically
+            ) {
                 Box(
                     Modifier
                         .width(24.dp)
@@ -150,6 +197,8 @@ private fun BlockScreen(
                 )
                 Spacer(Modifier.width(12.dp))
                 Text(verse.reference.uppercase(), style = Eyebrow, color = Ink.Brass)
+                Spacer(Modifier.width(10.dp))
+                Text("READ IT", style = Eyebrow, color = Ink.Dim)
             }
         }
 

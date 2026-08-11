@@ -4,6 +4,7 @@ import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
 import android.provider.Settings
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -25,13 +26,16 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
+import com.dan.anchor.R
 import com.dan.anchor.block.BlockRules
 import com.dan.anchor.block.BlockerService
-import com.dan.anchor.block.Watch
 import com.dan.anchor.data.Prefs
 import com.dan.anchor.data.Rule
+import com.dan.anchor.data.Schedule
 import kotlinx.coroutines.delay
 
 @Composable
@@ -44,15 +48,17 @@ fun BlocksScreen() {
 
     var serviceOn by remember { mutableStateOf(false) }
     var now by remember { mutableLongStateOf(System.currentTimeMillis()) }
-    LaunchedEffect(Unit) {
+    LaunchedEffect(strict) {
         while (true) {
             serviceOn = isServiceEnabled(ctx)
             now = System.currentTimeMillis()
-            delay(1_000)
+            // A countdown needs every second. A "3 of 10 min used" line does not.
+            delay(if (strict) 1_000L else 5_000L)
         }
     }
 
     var sheet by remember { mutableStateOf<Sheet?>(null) }
+    var showDisclosure by remember { mutableStateOf(false) }
 
     // Deliberately not rememberSaveable: leaving the tab re-hides the private
     // list. Handing someone your phone shouldn't leave it open behind you.
@@ -72,10 +78,15 @@ fun BlocksScreen() {
         val moreTime = previous != null && !previous.isHardBlock && !rule.isHardBlock &&
             rule.limitMinutes > previous.limitMinutes
         val unblocking = previous != null && previous.isHardBlock && !rule.isHardBlock
+        // Narrowing the hours it applies means blocked for less of the week.
+        val shorterHours = previous != null && rule.coverageMinutes() < previous.coverageMinutes()
 
-        if (moreTime || unblocking) {
+        if (moreTime || unblocking || shorterHours) {
             val what = if (previous.hidden) "a private block" else previous.label
-            gate.loosen("Giving $what more time than it had.") {
+            val why = if (shorterHours && !moreTime && !unblocking)
+                "Blocking $what for fewer hours than before."
+            else "Giving $what more time than it had."
+            gate.loosen(why) {
                 if (replacing != null && replacing.target != rule.target) prefs.removeRule(replacing)
                 prefs.upsertRule(rule)
             }
@@ -95,9 +106,21 @@ fun BlocksScreen() {
         contentPadding = PaddingValues(start = 24.dp, end = 24.dp, top = 56.dp, bottom = 24.dp)
     ) {
         item {
-            Text("BLOCKS", style = Eyebrow)
-            Spacer(Modifier.height(8.dp))
-            Text("Anchor", style = MaterialTheme.typography.displaySmall)
+            // The screen's own name is the title, matching Settings and Bible.
+            // The mark and the app name carry the branding instead.
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Image(
+                    painter = painterResource(R.drawable.ic_anchor_mark),
+                    contentDescription = null,
+                    modifier = Modifier.size(width = 32.dp, height = 41.dp)
+                )
+                Spacer(Modifier.width(14.dp))
+                Column {
+                    Text("ANCHOR", style = Eyebrow)
+                    Spacer(Modifier.height(4.dp))
+                    Text("Blocks", style = MaterialTheme.typography.displaySmall)
+                }
+            }
             Spacer(Modifier.height(28.dp))
         }
 
@@ -109,13 +132,7 @@ fun BlocksScreen() {
                         "front. Find Anchor under Settings, Accessibility, Installed apps and switch " +
                         "it on. Leave the shortcut toggle off — it's a one-tap kill switch.",
                     cta = "Open accessibility settings"
-                ) {
-                    prefs.allowSettingsBriefly()
-                    ctx.startActivity(
-                        Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)
-                            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                    )
-                }
+                ) { showDisclosure = true }
                 Spacer(Modifier.height(24.dp))
             }
         }
@@ -202,8 +219,6 @@ fun BlocksScreen() {
 
         item {
             Spacer(Modifier.height(24.dp))
-            LiveCard(now = now, serviceOn = serviceOn)
-            Spacer(Modifier.height(24.dp))
             Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                 AddButton("App", Modifier.weight(1f)) { sheet = Sheet.App(null) }
                 AddButton("Website", Modifier.weight(1f)) { sheet = Sheet.Site(null) }
@@ -212,14 +227,15 @@ fun BlocksScreen() {
             Text(
                 when {
                     !editable ->
-                        "Adding a block still works. Removing one, or giving it more time, needs " +
-                            "the cooldown to finish first."
+                        "You can still add to the block list. To remove anything, or give it more " +
+                            "time, you'll need to wait for the cooldown to finish."
                     prefs.hasPin ->
-                        "Tap a rule to change it. Adding a block is free; removing one, or giving " +
-                            "it more time, asks for your PIN."
+                        "Tap a rule to change it. You don't need your PIN to add apps or websites " +
+                            "to the block list, but you do need it to remove them or give them " +
+                            "more time."
                     else ->
-                        "Tap a rule to change it. Set a PIN in Settings and removing a block will " +
-                            "start asking for it."
+                        "Tap a rule to change it. Once you set a PIN in Settings, you'll need it " +
+                            "to remove anything from the block list."
                 },
                 style = MaterialTheme.typography.bodyMedium,
                 color = Ink.Dim
@@ -227,19 +243,39 @@ fun BlocksScreen() {
         }
     }
 
+    if (showDisclosure) {
+        AccessibilityDisclosure(
+            onAccept = {
+                showDisclosure = false
+                prefs.allowSettingsBriefly()
+                ctx.startActivity(
+                    Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)
+                        .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                )
+            },
+            onDismiss = { showDisclosure = false }
+        )
+    }
+
     when (val sh = sheet) {
         is Sheet.App -> AppSheet(
             existing = sh.rule,
             onDismiss = { sheet = null }
-        ) { pkg, label, mins, priv ->
-            save(Rule(pkg, label, isApp = true, limitMinutes = mins, hidden = priv), sh.rule)
+        ) { pkg, label, mins, priv, sc ->
+            save(
+                Rule(pkg, label, isApp = true, limitMinutes = mins, hidden = priv, schedule = sc),
+                sh.rule
+            )
             sheet = null
         }
         is Sheet.Site -> SiteSheet(
             existing = sh.rule,
             onDismiss = { sheet = null }
-        ) { host, mins, priv ->
-            save(Rule(host, host, isApp = false, limitMinutes = mins, hidden = priv), sh.rule)
+        ) { host, mins, priv, sc ->
+            save(
+                Rule(host, host, isApp = false, limitMinutes = mins, hidden = priv, schedule = sc),
+                sh.rule
+            )
             sheet = null
         }
         null -> Unit
@@ -285,86 +321,6 @@ private fun fmt(seconds: Long): String {
     val m = (seconds % 3600) / 60
     val s = seconds % 60
     return if (h > 0) "%d:%02d:%02d".format(h, m, s) else "%d:%02d".format(m, s)
-}
-
-/**
- * Shows what the service is seeing right now. Reading a browser's address bar
- * depends on internals that differ between browser versions and phone makers,
- * so when a site doesn't get blocked this says whether the service is running,
- * whether events are arriving, and whether the address was readable.
- */
-@Composable
-private fun LiveCard(now: Long, serviceOn: Boolean) {
-    var open by remember { mutableStateOf(false) }
-    val quiet = Watch.lastEventAt == 0L || now - Watch.lastEventAt > 10_000L
-
-    Column(
-        Modifier
-            .fillMaxWidth()
-            .clip(RoundedCornerShape(14.dp))
-            .background(Ink.Surface)
-            .border(1.dp, Ink.Hairline, RoundedCornerShape(14.dp))
-            .clickable { open = !open }
-            .padding(18.dp)
-    ) {
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            Box(
-                Modifier
-                    .size(6.dp)
-                    .clip(RoundedCornerShape(3.dp))
-                    .background(
-                        when {
-                            !serviceOn -> Ink.Rust
-                            quiet -> Ink.Slate
-                            else -> Ink.Brass
-                        }
-                    )
-            )
-            Spacer(Modifier.width(12.dp))
-            Text(
-                when {
-                    !serviceOn -> "NOT RUNNING"
-                    quiet -> "RUNNING, NOTHING SEEN YET"
-                    else -> "WATCHING"
-                },
-                style = Eyebrow,
-                color = if (serviceOn) Ink.Bone else Ink.Rust
-            )
-            Spacer(Modifier.weight(1f))
-            Text(if (open) "HIDE" else "DETAILS", style = Eyebrow, color = Ink.Dim)
-        }
-
-        if (open) {
-            Spacer(Modifier.height(16.dp))
-            Detail("Events seen", if (Watch.eventCount == 0L) "none" else "${Watch.eventCount}")
-            Detail("App in front", Watch.lastPackage.ifBlank { "-" })
-            Detail(
-                "Address read",
-                if (Watch.lastUrl.isBlank()) "-" else "${Watch.lastUrl}  (${Watch.lastUrlSource})"
-            )
-            Detail("Last decision", Watch.lastDecision.ifBlank { "-" })
-            Spacer(Modifier.height(14.dp))
-            Text(
-                "Open a browser, go to a blocked site, then come back here. If the app in front " +
-                    "never shows your browser, the service isn't getting events. If it shows the " +
-                    "browser but no address, Anchor can't read that browser's address bar — block " +
-                    "the browser itself instead.",
-                style = MaterialTheme.typography.bodyMedium,
-                color = Ink.Dim
-            )
-        }
-    }
-}
-
-@Composable
-private fun Detail(label: String, value: String) {
-    Row(Modifier.fillMaxWidth().padding(vertical = 5.dp)) {
-        Text(
-            label, style = MaterialTheme.typography.bodyMedium, color = Ink.Dim,
-            modifier = Modifier.width(110.dp)
-        )
-        Text(value, style = MaterialTheme.typography.bodyMedium, color = Ink.Bone)
-    }
 }
 
 @Composable
@@ -420,10 +376,18 @@ private fun RuleRow(
             }
             Spacer(Modifier.height(3.dp))
             Text(
-                if (rule.isHardBlock) {
-                    if (rule.isApp) "App · always blocked" else "Site · always blocked"
-                } else {
-                    "${if (rule.isApp) "App" else "Site"} · $usedMinutes of ${rule.limitMinutes} min used today"
+                buildString {
+                    append(if (rule.isApp) "App" else "Site")
+                    append(" · ")
+                    if (rule.isHardBlock) append("always blocked")
+                    else append("$usedMinutes of ${rule.limitMinutes} min used today")
+                    rule.schedule?.let { sc ->
+                        append(" · ")
+                        append(
+                            if (sc.isAllDay) dayLabel(sc.days)
+                            else "${Schedule.format(sc.fromMinutes)}-${Schedule.format(sc.toMinutes)} ${dayLabel(sc.days)}"
+                        )
+                    }
                 },
                 style = MaterialTheme.typography.bodyMedium,
                 color = Ink.Dim
@@ -467,7 +431,7 @@ private fun AddButton(label: String, modifier: Modifier = Modifier, onClick: () 
 private fun AppSheet(
     existing: Rule?,
     onDismiss: () -> Unit,
-    onSave: (String, String, Int, Boolean) -> Unit
+    onSave: (String, String, Int, Boolean, Schedule?) -> Unit
 ) {
     val ctx = LocalContext.current
     var apps by remember { mutableStateOf<List<Pair<String, String>>>(emptyList()) }
@@ -477,6 +441,7 @@ private fun AppSheet(
     }
     var minutes by remember { mutableStateOf(existing?.limitMinutes?.toString() ?: "0") }
     var priv by remember { mutableStateOf(existing?.hidden ?: false) }
+    var sched by remember { mutableStateOf(existing?.schedule) }
 
     LaunchedEffect(Unit) { apps = launchableApps(ctx) }
 
@@ -510,14 +475,18 @@ private fun AppSheet(
                     }
                 }
             } else {
+                Column(Modifier.verticalScroll(rememberScrollState())) {
                 Text(selected!!.second, style = MaterialTheme.typography.titleLarge)
                 Spacer(Modifier.height(16.dp))
                 LimitPicker(minutes) { minutes = it }
-                Spacer(Modifier.height(20.dp))
+                Spacer(Modifier.height(24.dp))
+                ScheduleEditor(sched) { sched = it }
+                Spacer(Modifier.height(24.dp))
                 PrivateToggle(priv) { priv = it }
                 Spacer(Modifier.height(24.dp))
                 PrimaryAction(if (existing != null) "Save changes" else "Add block") {
-                    onSave(selected!!.first, selected!!.second, minutes.toIntOrNull() ?: 0, priv)
+                    onSave(selected!!.first, selected!!.second, minutes.toIntOrNull() ?: 0, priv, sched)
+                }
                 }
             }
         }
@@ -529,11 +498,12 @@ private fun AppSheet(
 private fun SiteSheet(
     existing: Rule?,
     onDismiss: () -> Unit,
-    onSave: (String, Int, Boolean) -> Unit
+    onSave: (String, Int, Boolean, Schedule?) -> Unit
 ) {
     var host by remember { mutableStateOf(existing?.target ?: "") }
     var minutes by remember { mutableStateOf(existing?.limitMinutes?.toString() ?: "0") }
     var priv by remember { mutableStateOf(existing?.hidden ?: false) }
+    var sched by remember { mutableStateOf(existing?.schedule) }
     val clean = BlockRules.host(host)
 
     ModalBottomSheet(onDismissRequest = onDismiss, containerColor = Ink.Surface) {
@@ -558,16 +528,135 @@ private fun SiteSheet(
             }
             Spacer(Modifier.height(20.dp))
             LimitPicker(minutes) { minutes = it }
-            Spacer(Modifier.height(20.dp))
+            Spacer(Modifier.height(24.dp))
+            ScheduleEditor(sched) { sched = it }
+            Spacer(Modifier.height(24.dp))
             PrivateToggle(priv) { priv = it }
             Spacer(Modifier.height(24.dp))
             PrimaryAction(
                 if (existing != null) "Save changes" else "Add block",
                 enabled = clean.contains('.')
             ) {
-                onSave(clean, minutes.toIntOrNull() ?: 0, priv)
+                onSave(clean, minutes.toIntOrNull() ?: 0, priv, sched)
             }
         }
+    }
+}
+
+@Composable
+private fun ScheduleEditor(
+    schedule: Schedule?,
+    onChange: (Schedule?) -> Unit
+) {
+    val ctx = LocalContext.current
+    val on = schedule != null
+    val sc = schedule ?: Schedule(emptySet(), 22 * 60, 7 * 60)
+
+    fun pickTime(current: Int, apply: (Int) -> Unit) {
+        android.app.TimePickerDialog(
+            ctx,
+            { _, h, m -> apply(h * 60 + m) },
+            current / 60, current % 60, true
+        ).show()
+    }
+
+    Column {
+        Row(verticalAlignment = Alignment.Top) {
+            Column(Modifier.weight(1f)) {
+                Text("Only at certain times", style = MaterialTheme.typography.bodyLarge)
+                Spacer(Modifier.height(4.dp))
+                Text(
+                    "Off means blocked around the clock.",
+                    style = MaterialTheme.typography.bodyMedium
+                )
+            }
+            Spacer(Modifier.width(16.dp))
+            Switch(
+                checked = on,
+                onCheckedChange = { onChange(if (it) sc else null) },
+                colors = SwitchDefaults.colors(
+                    checkedThumbColor = Ink.Void,
+                    checkedTrackColor = Ink.Brass,
+                    uncheckedThumbColor = Ink.Slate,
+                    uncheckedTrackColor = Ink.Raised,
+                    uncheckedBorderColor = Ink.Hairline
+                )
+            )
+        }
+
+        if (on) {
+            Spacer(Modifier.height(18.dp))
+            Text("DAYS", style = Eyebrow, color = Ink.Dim)
+            Spacer(Modifier.height(10.dp))
+            Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                listOf(1 to "M", 2 to "T", 3 to "W", 4 to "T", 5 to "F", 6 to "S", 7 to "S")
+                    .forEach { (day, letter) ->
+                        // Empty set means every day, so show them all lit.
+                        val picked = sc.days.isEmpty() || sc.days.contains(day)
+                        Text(
+                            letter,
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = if (picked) Ink.Void else Ink.Bone,
+                            modifier = Modifier
+                                .weight(1f)
+                                .clip(RoundedCornerShape(8.dp))
+                                .background(if (picked) Ink.Brass else Ink.Raised)
+                                .clickable {
+                                    val base = if (sc.days.isEmpty()) Schedule.ALL_DAYS else sc.days
+                                    val next = if (base.contains(day)) base - day else base + day
+                                    // Never let them clear every day — that would
+                                    // silently mean "never blocked".
+                                    onChange(sc.copy(days = if (next.isEmpty()) Schedule.ALL_DAYS else next))
+                                }
+                                .padding(vertical = 12.dp),
+                            textAlign = TextAlign.Center
+                        )
+                    }
+            }
+
+            Spacer(Modifier.height(18.dp))
+            Text("BETWEEN", style = Eyebrow, color = Ink.Dim)
+            Spacer(Modifier.height(10.dp))
+            Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                TimeChip(Schedule.format(sc.fromMinutes), Modifier.weight(1f)) {
+                    pickTime(sc.fromMinutes) { onChange(sc.copy(fromMinutes = it)) }
+                }
+                Text(
+                    "to",
+                    style = MaterialTheme.typography.bodyMedium,
+                    modifier = Modifier.align(Alignment.CenterVertically)
+                )
+                TimeChip(Schedule.format(sc.toMinutes), Modifier.weight(1f)) {
+                    pickTime(sc.toMinutes) { onChange(sc.copy(toMinutes = it)) }
+                }
+            }
+            Spacer(Modifier.height(10.dp))
+            Text(
+                when {
+                    sc.isAllDay -> "Same start and end — blocked all day on those days."
+                    sc.wrapsMidnight ->
+                        "Runs overnight: from ${Schedule.format(sc.fromMinutes)} through to " +
+                            "${Schedule.format(sc.toMinutes)} the next morning."
+                    else -> "Blocked between those hours on the days you picked."
+                },
+                style = MaterialTheme.typography.bodyMedium,
+                color = Ink.Dim
+            )
+        }
+    }
+}
+
+@Composable
+private fun TimeChip(label: String, modifier: Modifier = Modifier, onClick: () -> Unit) {
+    Box(
+        modifier
+            .clip(RoundedCornerShape(10.dp))
+            .background(Ink.Raised)
+            .clickable(onClick = onClick)
+            .padding(vertical = 14.dp),
+        contentAlignment = Alignment.Center
+    ) {
+        Text(label, style = MaterialTheme.typography.bodyLarge, color = Ink.Brass)
     }
 }
 
@@ -682,6 +771,13 @@ internal fun PrimaryAction(label: String, enabled: Boolean = true, onClick: () -
     ) {
         Text(label.uppercase(), style = Eyebrow, color = if (enabled) Ink.Void else Ink.Dim)
     }
+}
+
+private fun dayLabel(days: Set<Int>): String = when {
+    days.isEmpty() || days.size == 7 -> "daily"
+    days == setOf(1, 2, 3, 4, 5) -> "weekdays"
+    days == setOf(6, 7) -> "weekends"
+    else -> days.sorted().joinToString("") { "MTWTFSS"[it - 1].toString() }
 }
 
 // ---------- helpers ----------

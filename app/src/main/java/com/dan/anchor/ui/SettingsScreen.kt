@@ -18,6 +18,8 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import com.dan.anchor.block.AdminReceiver
+import com.dan.anchor.block.BlockerService
+import com.dan.anchor.block.Watch
 import com.dan.anchor.data.Prefs
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
@@ -90,11 +92,20 @@ fun SettingsScreen() {
         // ---- strict mode ----
         Section("STRICT MODE")
         Text(
-            "Strict mode makes loosening a block take two things you can't produce in the moment: " +
-                "your PIN, and time. Starting the wait asks for the PIN, the cooldown then has to " +
-                "run out, and only after that do the rules open up. Adding a new block never needs " +
-                "either.",
+            "Without strict mode, your PIN is enough to remove a block straight away.",
             style = MaterialTheme.typography.bodyMedium
+        )
+        Spacer(Modifier.height(10.dp))
+        Text(
+            "With it on, you enter your PIN to start a timer, then have to wait for that timer to " +
+                "run out before the change is allowed. Adding a block is unaffected either way.",
+            style = MaterialTheme.typography.bodyMedium
+        )
+        Spacer(Modifier.height(10.dp))
+        Text(
+            "Highly recommended if you know your own PIN.",
+            style = MaterialTheme.typography.bodyMedium,
+            color = Ink.Brass
         )
         Spacer(Modifier.height(16.dp))
 
@@ -221,21 +232,25 @@ fun SettingsScreen() {
         // ---- uninstall protection ----
         Section("UNINSTALL PROTECTION")
         Text(
-            "Registering Anchor as a device administrator greys out Uninstall — long-pressing the " +
-                "icon or hitting Uninstall in Settings won't work. To uninstall, you turn this off " +
-                "here with the PIN first.",
+            "When uninstall protection is on, long-pressing the app icon or hitting Uninstall in " +
+                "Settings won't work. To uninstall Anchor, first turn uninstall protection off " +
+                "here by entering your PIN.",
             style = MaterialTheme.typography.bodyMedium
+        )
+        Spacer(Modifier.height(10.dp))
+        Text(
+            "It works by registering Anchor as a device administrator, so that's the wording " +
+                "Android will use when it asks you to approve it.",
+            style = MaterialTheme.typography.bodyMedium,
+            color = Ink.Dim
         )
         Spacer(Modifier.height(16.dp))
 
         when {
             adminOn -> {
-                Text(
-                    "On. Anchor can't be uninstalled until this is switched off.",
-                    style = MaterialTheme.typography.bodyLarge
-                )
+                Text("Protection is on.", style = MaterialTheme.typography.bodyLarge)
                 Spacer(Modifier.height(14.dp))
-                PrimaryAction("Turn protection off") {
+                PrimaryAction("Turn uninstall protection off") {
                     gate.loosen("Allowing Anchor to be uninstalled again.") {
                         AdminReceiver.disable(ctx)
                         adminOn = false
@@ -338,6 +353,17 @@ fun SettingsScreen() {
 
         Divider24()
 
+        Section("WHAT ANCHOR IS SEEING")
+        Text(
+            "Diagnostics, for when something isn't being blocked and you want to know why. " +
+                "Clears itself after a minute or two.",
+            style = MaterialTheme.typography.bodyMedium
+        )
+        Spacer(Modifier.height(14.dp))
+        LiveCard(now = now)
+
+        Divider24()
+
         Section("ABOUT")
         Text(
             "Anchor keeps everything on this phone. No account, no sync, nothing uploaded. " +
@@ -386,6 +412,80 @@ fun SettingsScreen() {
 }
 
 // ---------- pieces ----------
+
+/**
+ * Reading a browser's address bar depends on internals that differ between
+ * browser versions and phone makers. When a site doesn't get blocked, this says
+ * whether the service is running, whether events are arriving, and whether the
+ * address was readable — which is the difference between a bug and an
+ * unsupported browser.
+ */
+@Composable
+private fun LiveCard(now: Long) {
+    val ctx = LocalContext.current
+    var open by remember { mutableStateOf(false) }
+    var serviceOn by remember { mutableStateOf(false) }
+    LaunchedEffect(now) { serviceOn = isServiceEnabled(ctx) }
+    val quiet = Watch.lastEventAt == 0L || now - Watch.lastEventAt > 10_000L
+
+    Column(
+        Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(14.dp))
+            .background(Ink.Surface)
+            .border(1.dp, Ink.Hairline, RoundedCornerShape(14.dp))
+            .clickable { open = !open }
+            .padding(18.dp)
+    ) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Box(
+                Modifier
+                    .size(6.dp)
+                    .clip(RoundedCornerShape(3.dp))
+                    .background(
+                        when {
+                            !serviceOn -> Ink.Rust
+                            quiet -> Ink.Slate
+                            else -> Ink.Brass
+                        }
+                    )
+            )
+            Spacer(Modifier.width(12.dp))
+            Text(
+                when {
+                    !serviceOn -> "NOT RUNNING"
+                    quiet -> "RUNNING, NOTHING SEEN YET"
+                    else -> "WATCHING"
+                },
+                style = Eyebrow,
+                color = if (serviceOn) Ink.Bone else Ink.Rust
+            )
+            Spacer(Modifier.weight(1f))
+            Text(if (open) "HIDE" else "DETAILS", style = Eyebrow, color = Ink.Dim)
+        }
+
+        if (open) {
+            Spacer(Modifier.height(16.dp))
+            Detail("Events seen", if (Watch.eventCount == 0L) "none" else "${Watch.eventCount}")
+            Detail("App in front", Watch.packageForDisplay().ifBlank { "-" })
+            Detail(
+                "Address read",
+                if (Watch.urlForDisplay().isBlank()) "-"
+                else "${Watch.urlForDisplay()}  (${Watch.sourceForDisplay()})"
+            )
+            Detail("Last decision", Watch.decisionForDisplay().ifBlank { "-" })
+            Spacer(Modifier.height(14.dp))
+            Text(
+                "Open a browser, go to a blocked site, then come back here. If the app in front " +
+                    "never shows your browser, the service isn't getting events. If it shows the " +
+                    "browser but no address, Anchor can't read that browser's address bar — block " +
+                    "the browser itself instead.",
+                style = MaterialTheme.typography.bodyMedium,
+                color = Ink.Dim
+            )
+        }
+    }
+}
 
 @Composable
 internal fun Callout(title: String, body: String) {

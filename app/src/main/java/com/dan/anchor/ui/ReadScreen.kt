@@ -1,6 +1,7 @@
 package com.dan.anchor.ui
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
@@ -11,6 +12,7 @@ import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.ArrowBack
+import androidx.compose.material.icons.outlined.ExpandMore
 import androidx.compose.material.icons.outlined.Search
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
@@ -41,8 +43,14 @@ private enum class Pane { READING, BOOKS, SEARCH }
  * The reader. All 31,098 verses live on the phone, so this works in a tunnel,
  * on a plane, or with the data turned off.
  */
+/** Where the block screen wants the reader to open. */
+data class PassageTarget(val book: String, val chapter: Int, val verse: Int)
+
 @Composable
-fun ReadScreen() {
+fun ReadScreen(
+    target: PassageTarget? = null,
+    onTargetHandled: () -> Unit = {}
+) {
     val ctx = LocalContext.current
     val prefs = remember { Prefs.get(ctx) }
     val scope = rememberCoroutineScope()
@@ -56,6 +64,7 @@ fun ReadScreen() {
     var hits by remember { mutableStateOf<List<SearchHit>>(emptyList()) }
     var error by remember { mutableStateOf<String?>(null) }
     var loading by remember { mutableStateOf(true) }
+    var pendingVerse by remember { mutableStateOf<Int?>(null) }
 
     val listState = rememberLazyListState()
 
@@ -67,13 +76,38 @@ fun ReadScreen() {
         loading = false
     }
 
+    // Jumped here from a block screen: open that passage and scroll to the verse.
+    LaunchedEffect(target, books) {
+        val t = target ?: return@LaunchedEffect
+        if (books.isEmpty()) return@LaunchedEffect
+        val b = books.firstOrNull { it.name.equals(t.book, ignoreCase = true) }
+        if (b != null) {
+            pane = Pane.READING
+            bookId = b.id
+            chapter = t.chapter.coerceIn(1, b.chapters)
+            pendingVerse = t.verse
+        }
+        onTargetHandled()
+    }
+
     LaunchedEffect(bookId, chapter) {
         runCatching { withContext(Dispatchers.IO) { BibleDb.chapter(ctx, bookId, chapter) } }
             .onSuccess {
                 verses = it
                 error = null
                 prefs.lastRead = "$bookId:$chapter"
-                runCatching { listState.scrollToItem(0) }
+                val want = pendingVerse
+                runCatching {
+                    if (want != null) {
+                        // Land a couple of verses early so the one you came for
+                        // has its context above it rather than jammed to the top.
+                        val idx = it.indexOfFirst { v -> v.number == want }
+                        listState.scrollToItem(if (idx > 2) idx - 2 else 0)
+                    } else {
+                        listState.scrollToItem(0)
+                    }
+                }
+                pendingVerse = null
             }
             .onRealFailure { error = describe(it) }
     }
@@ -115,12 +149,30 @@ fun ReadScreen() {
                     style = Eyebrow, color = Ink.Dim
                 )
                 if (pane == Pane.READING) {
-                    Spacer(Modifier.height(6.dp))
-                    Text(
-                        "${book?.name ?: ""} $chapter",
-                        style = MaterialTheme.typography.titleLarge,
-                        modifier = Modifier.clickable { pane = Pane.BOOKS }
-                    )
+                    Spacer(Modifier.height(8.dp))
+                    // Looks like a control, because it is one — plain text here
+                    // gave no hint that tapping opens the book list.
+                    Row(
+                        Modifier
+                            .clip(RoundedCornerShape(10.dp))
+                            .background(Ink.Surface)
+                            .border(1.dp, Ink.Hairline, RoundedCornerShape(10.dp))
+                            .clickable { pane = Pane.BOOKS }
+                            .padding(start = 14.dp, end = 10.dp, top = 8.dp, bottom = 8.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            "${book?.name ?: ""} $chapter",
+                            style = MaterialTheme.typography.titleLarge
+                        )
+                        Spacer(Modifier.width(8.dp))
+                        Icon(
+                            Icons.Outlined.ExpandMore,
+                            contentDescription = "Choose a book",
+                            tint = Ink.Brass,
+                            modifier = Modifier.size(20.dp)
+                        )
+                    }
                 }
             }
             if (pane == Pane.READING) {

@@ -10,8 +10,10 @@ instead.
 - **PIN on everything that loosens** — removing a block, stretching a limit, or switching strict
   mode off all ask for it. Adding a block never does
 - **Strict mode** — PIN plus a cooldown, so turning blocking off stops being a snap decision
-- **Uninstall protection** — getting rid of Anchor takes the PIN too
+- **Optional Uninstall protection** — getting rid of Anchor takes the PIN too
+- **Schedules** — block only after 10pm, or only on weekdays, or around the clock
 - **The whole Bible offline** — all 66 books, 31,098 verses, with search. No connection needed
+- **Tap a verse reference** on the block screen to read the passage it came from
 
 Everything stays on your phone. No account, no sync, no ads, nothing uploaded.
 
@@ -19,26 +21,112 @@ Scripture is the World English Bible, which is public domain, so there's nothing
 
 ---
 
-## Just want to install it?
+## Read this before you install
 
-Grab the APK from the [Releases](../../releases) page. You don't need any of the build
-instructions below.
+**Installing Anchor is going to feel alarming.** Your phone will try to talk you out of it
+several times, using some genuinely frightening language. None of those warnings mean
+something is wrong with the app. They mean the app didn't come from the Google Play Store.
 
-Android will warn you the app is from an unknown source, or Play Protect will say it blocked
-it. That's Google flagging anything that didn't come from the Play Store, not a problem with
-the app — tap **More details**, then **Install anyway**.
+I want to be straight with you about why, and about exactly what you're going to see, so
+that none of it takes you by surprise.
 
-On first run Anchor will ask for the accessibility permission. The warning Android shows here
-sounds alarming: it says the app can view and control your screen, and that's technically
-true, because reading which app you're in and what's in the browser address bar is the only
-way any blocker can work. None of it goes anywhere. If you'd rather check that for yourself
-than take my word for it, that's what the source in this repo is for.
+### Why it isn't on the Play Store
 
-On the same screen, leave **Anchor blocking shortcut** switched off. It puts a floating button
-on screen that disables blocking in one tap, which rather defeats the purpose.
+Putting an app on the Play Store costs money, requires a verified developer identity, and
+takes weeks of review. Anchor is free, has no ads, collects nothing, and makes me nothing. 
+I built it for myself, and I'm sharing it because it might help other Christians - and anyone trying to get their screen time under control!
 
-Then add your blocks, and **get someone you trust to set the PIN and keep it**. A PIN you know
-yourself is a speed bump you'll drive over at two in the morning.
+Having this app off the app store means you're going to see a bunch of warning screens while installing! Sorry haha
+
+### The other reason it looks scary
+
+Anchor genuinely does ask for powerful permissions. It has to. To block an app or a
+website, something has to be able to see which app is open and what's in your browser's
+address bar. There is no gentler way to do that on Android — every App/Website blocker app works this way.
+
+Android can't automatically tell the difference between an app that reads your screen to block Reddit and
+one that reads your screen to steal your banking password. So it warns you as though it's
+the second one. That's the right call by Android, and it's why the warnings exist.
+
+**But please don't just take my word for any of this."Trust me bro" from a stranger on
+the internet should mean nothing to you, especially about an app asking for permissions
+this powerful.** If I'm asking you to hand over that much access, the burden is on me to let
+you check, not on you to take it on faith.
+
+So check it:
+
+- **The entire source code is in this repository.** Nothing is hidden or compiled away. If
+  you know someone who codes, hand them the link and ask them to look for anything that
+  sends data anywhere. There's one network request in the whole app, and it downloads a
+  public list of adult sites to block.
+- **Look up how app blockers work on Android.** Search for how Cold Turkey, AppBlock,
+  BlockSite or any of the others do it. You'll find they all use the same accessibility
+  permission, for the same reason, because there isn't another way.
+- **Search the warnings themselves.** "Unsafe app blocked", "restricted setting",
+  "unknown sources" — see what people say about what those actually mean.
+
+**I'd genuinely rather you spent twenty minutes checking and then installed it with your eyes
+open, than installing it nervously, with a fear in the back of your mind about the app.** I don't want you to be scared off installing something I think can genuinely help you~!
+
+### What you'll actually see, step by step
+
+You'll hit roughly five or six of these, depending on your phone settings etc. Every one is normal.
+
+**1. Downloading the APK file in Github**
+Your browser will say something like *"This type of file can harm your device. Do you want
+to keep anchor-1.1.apk anyway?"*
+→ Tap **Download anyway** or **OK**.
+
+**2. Being allowed to install at all**
+When you open the file, you'll likely get *"For your security, your phone is not allowed to
+install unknown apps from this source."*
+→ Tap **Settings**, turn on **Allow from this source**, then press back.
+
+**3. Play Protect**
+Google will scan it and may say *"Unsafe app blocked"* or *"App scan recommended"*.
+→ Tap **More details**, then **Install anyway**. If it offers to send the app to Google for
+scanning, you can say yes or no — either is fine. If this doesn't work you may need to turn app scanning off for now (turn it back on once app is all set up if you like)
+
+**4. Samsung phones only: Auto Blocker**
+Newer Samsungs ship with Auto Blocker on, which refuses sideloaded apps outright.
+→ Settings → Security and privacy → Auto Blocker → turn off **Block app installs from
+unauthorised sources**. Turn it back on afterwards if you like; Anchor keeps working.
+
+**5. Unlocking the accessibility setting**
+This one catches everybody. On Android 13 and newer, apps installed outside the Play Store
+are blocked from accessibility by default, and the switch will simply be greyed out with a
+message about a **restricted setting**.
+→ Settings → Apps → Anchor → tap the **⋮** menu in the top corner → **Allow restricted
+settings**.
+
+**6. The accessibility permission itself**
+Settings → Accessibility → Installed apps → Anchor → turn on. Android will warn that Anchor
+can **view and control your screen**.
+
+That warning is accurate, and Anchor will show you its own plain-English explanation first.
+It reads which app is in front and what's in your browser address bar. It does not read
+your messages or anything you type, it keeps no history of where you've been, and nothing
+leaves your phone.
+
+**Also on that screen:** leave **Anchor blocking shortcut** switched OFF. It adds a floating
+button that turns blocking off in one tap, which rather defeats the point.
+
+**7. Optional: uninstall protection**
+If you turn this on later, you'll get one more approval screen about a **device
+administrator**. This is what stops you deleting the app in a weak moment.
+
+
+### Then you're in
+
+Add the apps and sites you want to stay off. You can block them outright, give them a few
+minutes a day, or only block them at certain hours.
+
+Adding a block never asks for anything. Removing one asks for your PIN.
+
+And the thing that actually makes this work: **get someone you trust to set the PIN and keep
+it.** A PIN you chose yourself is a speed bump you'll drive over at two in the morning.
+
+Download the APK from the [Releases](../../releases) page.
 
 ---
 

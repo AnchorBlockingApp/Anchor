@@ -3,7 +3,7 @@ package com.dan.anchor.block
 import android.accessibilityservice.AccessibilityService
 import android.content.Intent
 import android.os.Handler
-import android.os.Looper
+import android.os.HandlerThread
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
 import com.dan.anchor.data.Prefs
@@ -19,7 +19,23 @@ import com.dan.anchor.data.Prefs
 class BlockerService : AccessibilityService() {
 
     private lateinit var prefs: Prefs
-    private val handler = Handler(Looper.getMainLooper())
+
+    /**
+     * An accessibility service shares the app's main looper, so polling there
+     * meant a blocking call into the system process on the same thread that
+     * draws the UI — once a second, which is exactly what you feel as lag.
+     * Everything heavy runs here instead.
+     */
+    private val worker = HandlerThread("anchor-watch").apply { start() }
+    private val handler = Handler(worker.looper)
+    private val power by lazy { getSystemService(POWER_SERVICE) as android.os.PowerManager }
+
+    /**
+     * The view id that actually worked for a given browser. Without this the
+     * service re-tries every id in the list once a second, which is ten calls
+     * across to the system process for no reason.
+     */
+    private val knownBarId = HashMap<String, String>()
 
     private var currentPkg: String = ""
     private var currentTrackedTarget: String? = null
@@ -34,6 +50,8 @@ class BlockerService : AccessibilityService() {
     private var cachedUrl: String = ""
     private var cachedAt: Long = 0L
 
+    @Volatile private var lastContentCheck: Long = 0L
+    private var lastUsageWrite: Long = 0L
     private var lastBlockedKey: String = ""
     private var lastBlockAt: Long = 0L
 
@@ -47,7 +65,8 @@ class BlockerService : AccessibilityService() {
     override fun onDestroy() {
         running = false
         handler.removeCallbacksAndMessages(null)
-        flushUsage()
+        flushUsage(force = true)
+        worker.quitSafely()
         super.onDestroy()
     }
 
@@ -63,16 +82,30 @@ class BlockerService : AccessibilityService() {
         Watch.note(pkg)
 
         if (pkg != currentPkg) {
-            flushUsage()
+            flushUsage(force = true)
             currentPkg = pkg
             forgetUrl()
             Watch.clearUrl()
         }
 
+        if (BlockOverlayActivity.showing) return
+
+        // Events make blocking feel instant; the one-second poll is what makes
+        // it reliable. Neither is trusted on its own. Both hand the actual work
+        // to the worker thread — this callback is on the UI thread.
         when (event.eventType) {
-            AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED -> handleForeground(pkg)
+            AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED ->
+                handler.post { handleForeground(pkg) }
+
             AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED -> {
-                if (BlockRules.isBrowser(pkg)) checkBrowser(pkg)
+                // A busy page fires these dozens of times a second. Reading the
+                // address bar that often is pure waste; it can't change faster
+                // than you can navigate.
+                val now = System.currentTimeMillis()
+                if (BlockRules.isBrowser(pkg) && now - lastContentCheck > 500L) {
+                    lastContentCheck = now
+                    handler.post { checkBrowser(pkg) }
+                }
             }
         }
     }
@@ -153,10 +186,16 @@ class BlockerService : AccessibilityService() {
 
     /** Known address-bar view ids only — never a guess based on content. */
     private fun findAddressBar(root: AccessibilityNodeInfo, pkg: String): AccessibilityNodeInfo? {
-        BlockRules.BROWSERS[pkg]?.let { id -> byId(root, id)?.let { return it } }
+        // Whatever worked last time, first. This is the difference between one
+        // lookup a second and eleven.
+        knownBarId[pkg]?.let { id -> byId(root, id)?.let { return it } }
+
+        BlockRules.BROWSERS[pkg]?.let { id ->
+            byId(root, id)?.let { knownBarId[pkg] = id; return it }
+        }
         for (id in BlockRules.URL_BAR_IDS) {
             val scoped = if (id.contains(':')) id else "$pkg:id/$id"
-            byId(root, scoped)?.let { return it }
+            byId(root, scoped)?.let { knownBarId[pkg] = scoped; return it }
         }
         return null
     }
@@ -229,46 +268,106 @@ class BlockerService : AccessibilityService() {
         } ?: run { stopTracking(); return }
 
         if (currentTrackedTarget != limited.target) {
-            flushUsage()
+            flushUsage(force = true)
             currentTrackedTarget = limited.target
             trackingSince = System.currentTimeMillis()
         }
     }
 
     private fun stopTracking() {
-        flushUsage()
+        flushUsage(force = true)
         currentTrackedTarget = null
     }
 
-    private fun flushUsage() {
+    /**
+     * Time already banked to storage, plus whatever this session has run up but
+     * not written yet. Lets the allowance check stay accurate to the second
+     * without a disk write every second.
+     */
+    private fun usedMillisIncludingSession(target: String): Long {
+        val banked = prefs.usedMillis(target)
+        if (currentTrackedTarget != target) return banked
+        val live = System.currentTimeMillis() - trackingSince
+        return banked + live.coerceIn(0, 3_600_000)
+    }
+
+    private fun flushUsage(force: Boolean = false) {
         val t = currentTrackedTarget ?: return
         val now = System.currentTimeMillis()
+        // Writing once a second was costing more than the timer is worth.
+        if (!force && now - lastUsageWrite < 15_000L) return
         val elapsed = now - trackingSince
         if (elapsed in 1_000..3_600_000) prefs.addUsageMillis(t, elapsed)
         trackingSince = now
+        lastUsageWrite = now
     }
 
     /**
-     * Runs once a second. Two jobs: notice when a daily allowance runs out
-     * mid-session, and re-read the address bar while a browser is in front.
-     * The poll matters because navigation inside a page often produces no
-     * event the service can act on.
+     * Windows that sit on top of whatever you're actually using. Treating these
+     * as "the foreground app" is what stopped daily timers: pull down the shade
+     * or tap a text field and the timer would quietly stop counting.
+     */
+    private fun isOverlayPackage(pkg: String): Boolean =
+        pkg == "com.android.systemui" ||
+            pkg.contains("inputmethod") ||
+            pkg.contains("keyboard") ||
+            pkg == packageName
+
+    /** What's genuinely in front right now, ignoring the shade and the keyboard. */
+    private fun foregroundPackage(): String? {
+        val live = runCatching { rootInActiveWindow?.packageName?.toString() }.getOrNull()
+        if (live != null && !isOverlayPackage(live)) return live
+        return currentPkg.takeIf { it.isNotBlank() && !isOverlayPackage(it) }
+    }
+
+    /**
+     * Runs once a second and is the authority on what's happening, rather than
+     * waiting for Android to send an event. Apps don't reliably emit a
+     * window-state change every time they come back to the front, and a daily
+     * timer that only starts on an event is a timer that silently reads zero.
      */
     private val ticker = object : Runnable {
         override fun run() {
-            if (::prefs.isInitialized) {
-                val t = currentTrackedTarget
-                if (t != null) {
-                    flushUsage()
-                    val rule = prefs.rules.value.firstOrNull { it.target == t }
-                    if (rule != null && !rule.isHardBlock &&
-                        prefs.usedMillis(t) >= rule.limitMinutes * 60_000L
-                    ) {
-                        stopTracking()
-                        fire(Decision.Block(rule.label, Decision.Reason.LIMIT_REACHED), key = "limit:$t")
+            val awake = runCatching { power.isInteractive }.getOrDefault(true)
+            if (awake && ::prefs.isInitialized && !BlockOverlayActivity.showing) {
+                val fg = foregroundPackage()
+
+                if (fg != null) {
+                    if (fg != currentPkg) {
+                        flushUsage(force = true)
+                        currentPkg = fg
+                        forgetUrl()
+                    }
+
+                    if (BlockRules.isBrowser(fg)) {
+                        checkBrowser(fg)
+                    } else {
+                        when (val d = BlockRules.evaluateApp(this@BlockerService, fg)) {
+                            is Decision.Block -> {
+                                stopTracking()
+                                fire(d, key = "app:$fg")
+                            }
+                            Decision.Allow -> startTrackingIfLimited(fg)
+                        }
                     }
                 }
-                if (BlockRules.isBrowser(currentPkg)) checkBrowser(currentPkg)
+
+                // Has an allowance run out mid-session?
+                val t = currentTrackedTarget
+                if (t != null) {
+                    val rule = prefs.rules.value.firstOrNull { it.target == t }
+                    if (rule != null && !rule.isHardBlock &&
+                        usedMillisIncludingSession(t) >= rule.limitMinutes * 60_000L
+                    ) {
+                        stopTracking()
+                        fire(
+                            Decision.Block(rule.publicLabel, Decision.Reason.LIMIT_REACHED),
+                            key = "limit:$t"
+                        )
+                    } else {
+                        flushUsage()
+                    }
+                }
             }
             if (running) handler.postDelayed(this, 1_000L)
         }
@@ -277,8 +376,11 @@ class BlockerService : AccessibilityService() {
     // ---------- showing the block screen ----------
 
     private fun fire(decision: Decision.Block, key: String) {
+        if (BlockOverlayActivity.showing) return
         val now = System.currentTimeMillis()
-        if (key == lastBlockedKey && now - lastBlockAt < 2_500L) return
+        // Generous window: relaunching swaps the verse mid-read, which is worse
+        // than briefly missing a genuine second block.
+        if (key == lastBlockedKey && now - lastBlockAt < 8_000L) return
         lastBlockedKey = key
         lastBlockAt = now
 

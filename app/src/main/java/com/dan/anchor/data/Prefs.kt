@@ -13,6 +13,59 @@ import java.util.Date
 import java.util.Locale
 
 /**
+ * When a rule applies. Null on a Rule means always.
+ *
+ * `days` uses 1=Monday through 7=Sunday, and empty means every day. Times are
+ * minutes from midnight. A window whose end is before its start runs overnight,
+ * which is the case people actually want — "block from 10pm to 7am".
+ */
+data class Schedule(
+    val days: Set<Int> = emptySet(),
+    val fromMinutes: Int = 0,
+    val toMinutes: Int = 0
+) {
+    private val activeDays: Set<Int> get() = if (days.isEmpty()) ALL_DAYS else days
+
+    val isAllDay: Boolean get() = fromMinutes == toMinutes
+    val wrapsMidnight: Boolean get() = !isAllDay && toMinutes < fromMinutes
+
+    fun activeAt(dayOfWeek: Int, minuteOfDay: Int): Boolean {
+        val d = activeDays
+        return when {
+            isAllDay -> d.contains(dayOfWeek)
+            !wrapsMidnight ->
+                d.contains(dayOfWeek) && minuteOfDay >= fromMinutes && minuteOfDay < toMinutes
+            else ->
+                (d.contains(dayOfWeek) && minuteOfDay >= fromMinutes) ||
+                    (d.contains(previousDay(dayOfWeek)) && minuteOfDay < toMinutes)
+        }
+    }
+
+    /**
+     * Used to tell tightening from loosening. Narrowing a window means you're
+     * blocked for fewer minutes, which is a loosening and costs the PIN.
+     */
+    fun blockedMinutesPerWeek(): Int {
+        val perDay = when {
+            isAllDay -> 1440
+            !wrapsMidnight -> toMinutes - fromMinutes
+            else -> (1440 - fromMinutes) + toMinutes
+        }
+        return perDay * activeDays.size
+    }
+
+    private fun previousDay(d: Int) = if (d == 1) 7 else d - 1
+
+    companion object {
+        val ALL_DAYS = setOf(1, 2, 3, 4, 5, 6, 7)
+        const val FULL_WEEK_MINUTES = 1440 * 7
+
+        fun format(minutes: Int): String =
+            "%02d:%02d".format(minutes / 60, minutes % 60)
+    }
+}
+
+/**
  * A rule is either an installed app (matched on package name) or a site
  * (matched on hostname). limitMinutes == 0 means "never allowed"; anything
  * higher gives you that many minutes per day before the block kicks in.
@@ -27,9 +80,15 @@ data class Rule(
      * your PIN — you shouldn't have to disclose what you're staying away from in
      * order to have them help you stay away from it.
      */
-    val hidden: Boolean = false
+    val hidden: Boolean = false,
+    /** When this rule applies. Null means around the clock. */
+    val schedule: Schedule? = null
 ) {
     val isHardBlock: Boolean get() = limitMinutes <= 0
+
+    /** Total minutes a week this rule is in force — the tighten/loosen yardstick. */
+    fun coverageMinutes(): Int =
+        schedule?.blockedMinutesPerWeek() ?: Schedule.FULL_WEEK_MINUTES
 
     /** What the block screen is allowed to say out loud. */
     val publicLabel: String get() = if (hidden) "something you've blocked" else label
@@ -59,7 +118,17 @@ class Prefs private constructor(context: Context) {
                     label = o.optString("label", o.getString("target")),
                     isApp = o.getBoolean("isApp"),
                     limitMinutes = o.optInt("limitMinutes", 0),
-                    hidden = o.optBoolean("hidden", false)
+                    hidden = o.optBoolean("hidden", false),
+                    schedule = o.optJSONObject("schedule")?.let { sc ->
+                        Schedule(
+                            days = sc.optString("days", "")
+                                .split(',')
+                                .mapNotNull { d -> d.trim().toIntOrNull() }
+                                .toSet(),
+                            fromMinutes = sc.optInt("from", 0),
+                            toMinutes = sc.optInt("to", 0)
+                        )
+                    }
                 )
             }
         }.getOrDefault(emptyList())
@@ -75,10 +144,22 @@ class Prefs private constructor(context: Context) {
                     .put("isApp", it.isApp)
                     .put("limitMinutes", it.limitMinutes)
                     .put("hidden", it.hidden)
+                    .apply {
+                        it.schedule?.let { sc ->
+                            put(
+                                "schedule",
+                                JSONObject()
+                                    .put("days", sc.days.sorted().joinToString(","))
+                                    .put("from", sc.fromMinutes)
+                                    .put("to", sc.toMinutes)
+                            )
+                        }
+                    }
             )
         }
         sp.edit().putString(KEY_RULES, arr.toString()).apply()
         _rules.value = list
+        refreshCaches(list)
     }
 
     fun upsertRule(rule: Rule) {
@@ -90,8 +171,24 @@ class Prefs private constructor(context: Context) {
         saveRules(_rules.value.filterNot { it.target == rule.target && it.isApp == rule.isApp })
     }
 
-    fun appRules(): List<Rule> = _rules.value.filter { it.isApp }
-    fun siteRules(): List<Rule> = _rules.value.filter { !it.isApp }
+    // Split once when the rules change, rather than allocating two new lists on
+    // every block decision.
+    @Volatile private var appRulesCache: List<Rule> = emptyList()
+    @Volatile private var siteRulesCache: List<Rule> = emptyList()
+
+    private fun refreshCaches(list: List<Rule>) {
+        appRulesCache = list.filter { it.isApp }
+        siteRulesCache = list.filter { !it.isApp }
+    }
+
+    // Must run after the two fields above are declared, or their own
+    // initialisers would immediately blank whatever we put there.
+    init {
+        refreshCaches(_rules.value)
+    }
+
+    fun appRules(): List<Rule> = appRulesCache
+    fun siteRules(): List<Rule> = siteRulesCache
 
     // ---------- adult filter ----------
 
@@ -204,7 +301,7 @@ class Prefs private constructor(context: Context) {
     fun addUsageMillis(target: String, ms: Long) {
         val k = usageKey(target)
         sp.edit().putLong(k, sp.getLong(k, 0L) + ms).apply()
-        pruneOldUsage()
+        pruneOldUsageIfNewDay()
     }
 
     fun usedMinutes(target: String): Int =
@@ -212,8 +309,18 @@ class Prefs private constructor(context: Context) {
 
     fun usedMillis(target: String): Long = sp.getLong(usageKey(target), 0L)
 
-    private fun pruneOldUsage() {
-        val prefixToday = "usage_${today()}_"
+    /**
+     * Reading the whole preferences map is expensive, and yesterday's keys only
+     * become stale once a day — so this runs on the first write after midnight
+     * rather than on every write.
+     */
+    private var lastPrunedDay: String = ""
+
+    private fun pruneOldUsageIfNewDay() {
+        val today = today()
+        if (lastPrunedDay == today) return
+        lastPrunedDay = today
+        val prefixToday = "usage_${today}_"
         val stale = sp.all.keys.filter { it.startsWith("usage_") && !it.startsWith(prefixToday) }
         if (stale.isEmpty()) return
         sp.edit().apply { stale.forEach { remove(it) } }.apply()
