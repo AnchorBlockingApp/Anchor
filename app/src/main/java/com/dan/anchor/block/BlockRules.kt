@@ -6,8 +6,18 @@ import com.dan.anchor.data.Rule
 
 sealed class Decision {
     object Allow : Decision()
-    data class Block(val label: String, val reason: Reason) : Decision()
-    enum class Reason { RULE, LIMIT_REACHED, ADULT, SELF_DEFENCE }
+    data class Block(
+        val label: String,
+        val reason: Reason,
+        /** Set for GATED blocks so the screen can show progress. */
+        val gateLabel: String = "",
+        val gateDone: Int = 0,
+        val gateNeeded: Int = 0,
+        /** The rule's own target, so the block screen can offer an extension. */
+        val target: String = ""
+    ) : Decision()
+
+    enum class Reason { RULE, LIMIT_REACHED, ADULT, SELF_DEFENCE, GATED }
 }
 
 object BlockRules {
@@ -67,7 +77,9 @@ object BlockRules {
         "tube8.com", "beeg.com", "motherless.com", "eporner.com", "txxx.com",
         "hqporner.com", "porntrex.com", "thumbzilla.com", "youjizz.com",
         "nudevista.com", "erome.com", "fapello.com", "rule34.xxx", "e-hentai.org",
-        "nhentai.net", "hanime.tv", "hentaihaven.xxx", "adultfriendfinder.com"
+        "nhentai.net", "hanime.tv", "hentaihaven.xxx", "adultfriendfinder.com",
+        "gelbooru.com", "danbooru.donmai.us", "safebooru.org", "yande.re",
+        "konachan.com", "anirole.com"
     )
 
     /** Substrings that, in a hostname or path, almost always mean adult content. */
@@ -186,10 +198,32 @@ object BlockRules {
             if (!sc.activeAt(dow, minute)) return Decision.Allow
         }
 
-        if (rule.isHardBlock) return Decision.Block(rule.publicLabel, Decision.Reason.RULE)
+        // An extension is a deliberate, rationed decision — it beats both the
+        // gate and the daily limit for as long as it runs.
+        if (prefs.emergencyActive(rule.target)) return Decision.Allow
+
+        // The gate comes before the allowance: the good thing has to happen
+        // first, and doing more of it never buys extra time here.
+        if (rule.hasGate && !rule.isHardBlock) {
+            val done = prefs.usedMinutes(rule.gateApp!!)
+            if (done < rule.gateMinutes) {
+                return Decision.Block(
+                    label = rule.publicLabel,
+                    reason = Decision.Reason.GATED,
+                    gateLabel = rule.gateLabel.ifBlank { "another app" },
+                    gateDone = done,
+                    gateNeeded = rule.gateMinutes,
+                    target = rule.target
+                )
+            }
+        }
+
+        if (rule.isHardBlock) {
+            return Decision.Block(rule.publicLabel, Decision.Reason.RULE, target = rule.target)
+        }
         val used = prefs.usedMinutes(rule.target)
         return if (used >= rule.limitMinutes) {
-            Decision.Block(rule.publicLabel, Decision.Reason.LIMIT_REACHED)
+            Decision.Block(rule.publicLabel, Decision.Reason.LIMIT_REACHED, target = rule.target)
         } else {
             Decision.Allow
         }

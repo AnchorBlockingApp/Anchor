@@ -82,8 +82,20 @@ data class Rule(
      */
     val hidden: Boolean = false,
     /** When this rule applies. Null means around the clock. */
-    val schedule: Schedule? = null
+    val schedule: Schedule? = null,
+    /**
+     * Package name of an app that must be used first, and for how long, before
+     * this rule's daily allowance opens up.
+     *
+     * Deliberately a prerequisite, not a currency: clocking extra time in the
+     * gate app never earns extra minutes here. The good thing just has to come
+     * first. That caps the payoff, so there's nothing to game.
+     */
+    val gateApp: String? = null,
+    val gateLabel: String = "",
+    val gateMinutes: Int = 0
 ) {
+    val hasGate: Boolean get() = gateApp != null && gateMinutes > 0
     val isHardBlock: Boolean get() = limitMinutes <= 0
 
     /** Total minutes a week this rule is in force — the tighten/loosen yardstick. */
@@ -119,6 +131,9 @@ class Prefs private constructor(context: Context) {
                     isApp = o.getBoolean("isApp"),
                     limitMinutes = o.optInt("limitMinutes", 0),
                     hidden = o.optBoolean("hidden", false),
+                    gateApp = o.optString("gateApp", "").takeIf { g -> g.isNotBlank() },
+                    gateLabel = o.optString("gateLabel", ""),
+                    gateMinutes = o.optInt("gateMinutes", 0),
                     schedule = o.optJSONObject("schedule")?.let { sc ->
                         Schedule(
                             days = sc.optString("days", "")
@@ -144,6 +159,9 @@ class Prefs private constructor(context: Context) {
                     .put("isApp", it.isApp)
                     .put("limitMinutes", it.limitMinutes)
                     .put("hidden", it.hidden)
+                    .put("gateApp", it.gateApp ?: "")
+                    .put("gateLabel", it.gateLabel)
+                    .put("gateMinutes", it.gateMinutes)
                     .apply {
                         it.schedule?.let { sc ->
                             put(
@@ -321,9 +339,100 @@ class Prefs private constructor(context: Context) {
         if (lastPrunedDay == today) return
         lastPrunedDay = today
         val prefixToday = "usage_${today}_"
-        val stale = sp.all.keys.filter { it.startsWith("usage_") && !it.startsWith(prefixToday) }
+        val stale = sp.all.keys.filter {
+            (it.startsWith("usage_") || it.startsWith("warn_") || it.startsWith("emgend_")) &&
+                !it.contains(today)
+        }
         if (stale.isEmpty()) return
         sp.edit().apply { stale.forEach { remove(it) } }.apply()
+    }
+
+    // ---------- emergency extensions ----------
+
+    /**
+     * A small, deliberately scarce release valve.
+     *
+     * A hard lockout mid-conversation is what makes someone uninstall the whole
+     * app, and then they have no blocking at all. Two a week is enough for the
+     * things that genuinely matter and useless as a daily habit.
+     */
+    private fun weekKey(): String {
+        val c = java.util.Calendar.getInstance()
+        return "%d_%02d".format(c.get(java.util.Calendar.YEAR), c.get(java.util.Calendar.WEEK_OF_YEAR))
+    }
+
+    var emergencyQuota: Int
+        get() = sp.getInt(KEY_EMERGENCY_QUOTA, 2)
+        set(v) = sp.edit().putInt(KEY_EMERGENCY_QUOTA, v.coerceIn(0, 7)).apply()
+
+    var emergencyMinutes: Int
+        get() = sp.getInt(KEY_EMERGENCY_MINUTES, 10)
+        set(v) = sp.edit().putInt(KEY_EMERGENCY_MINUTES, v.coerceIn(1, 60)).apply()
+
+    fun emergenciesUsedThisWeek(): Int = sp.getInt("emg_${weekKey()}", 0)
+
+    fun emergenciesLeft(): Int = (emergencyQuota - emergenciesUsedThisWeek()).coerceAtLeast(0)
+
+    /** Grants extra minutes on one target and spends one of the week's allowance. */
+    fun grantEmergency(target: String) {
+        val k = "emg_${weekKey()}"
+        sp.edit()
+            .putInt(k, sp.getInt(k, 0) + 1)
+            .putLong("emgend_${today()}_$target", System.currentTimeMillis() + emergencyMinutes * 60_000L)
+            .apply()
+    }
+
+    /** True while an extension on this target is still running. */
+    fun emergencyActive(target: String): Boolean =
+        System.currentTimeMillis() < sp.getLong("emgend_${today()}_$target", 0L)
+
+    fun emergencyEndsAt(target: String): Long = sp.getLong("emgend_${today()}_$target", 0L)
+
+    // ---------- time warnings ----------
+
+    var warningsOn: Boolean
+        get() = sp.getBoolean(KEY_WARNINGS, true)
+        set(v) = sp.edit().putBoolean(KEY_WARNINGS, v).apply()
+
+    /** Stops the same warning firing twice for one target in one day. */
+    fun warningShown(target: String, threshold: Int): Boolean =
+        sp.getBoolean("warn_${today()}_${target}_$threshold", false)
+
+    fun markWarningShown(target: String, threshold: Int) {
+        sp.edit().putBoolean("warn_${today()}_${target}_$threshold", true).apply()
+    }
+
+    // ---------- forgotten PIN ----------
+
+    /**
+     * A way out that can't be used on impulse. Seven days is long enough that
+     * nobody starts it to get past a block tonight, and short enough that a
+     * genuinely lost PIN isn't permanent.
+     */
+    fun startPinReset(): Long {
+        val existing = sp.getLong(KEY_PIN_RESET_AT, 0L)
+        if (existing > 0L) return existing
+        val at = System.currentTimeMillis() + 7L * 24 * 60 * 60 * 1000
+        sp.edit().putLong(KEY_PIN_RESET_AT, at).apply()
+        return at
+    }
+
+    fun pinResetAt(): Long = sp.getLong(KEY_PIN_RESET_AT, 0L)
+
+    fun cancelPinReset() = sp.edit().remove(KEY_PIN_RESET_AT).apply()
+
+    fun pinResetReady(): Boolean {
+        val at = pinResetAt()
+        return at > 0L && System.currentTimeMillis() >= at
+    }
+
+    /** Clears the PIN entirely so a new one can be set. Only after the wait. */
+    fun clearPin() {
+        sp.edit()
+            .remove(KEY_PIN_HASH)
+            .remove(KEY_PIN_SALT)
+            .remove(KEY_PIN_RESET_AT)
+            .apply()
     }
 
     // ---------- misc ----------
@@ -359,6 +468,10 @@ class Prefs private constructor(context: Context) {
         private const val KEY_BLOCK_COUNT = "block_count"
         private const val KEY_LAST_READ = "last_read"
         private const val KEY_SETTINGS_GRACE = "settings_grace"
+        private const val KEY_EMERGENCY_QUOTA = "emergency_quota"
+        private const val KEY_EMERGENCY_MINUTES = "emergency_minutes"
+        private const val KEY_WARNINGS = "warnings_on"
+        private const val KEY_PIN_RESET_AT = "pin_reset_at"
 
         @Volatile private var instance: Prefs? = null
 

@@ -13,6 +13,9 @@ instead.
 - **Optional Uninstall protection** — getting rid of Anchor takes the PIN too
 - **Schedules** — block only after 10pm, or only on weekdays, or around the clock
 - **The whole Bible offline** — all 66 books, 31,098 verses, with search. No connection needed
+- **Unlock gates** — Reddit stays shut until you've done ten minutes in your language app
+- **Emergency extensions** — a couple a week, no PIN needed, for when time runs out mid-conversation on instagram, for example.
+- **Time warnings** — a quiet heads-up before an allowance ends
 - **Tap a verse reference** on the block screen to read the passage it came from
 
 Everything stays on your phone. No account, no sync, no ads, nothing uploaded.
@@ -33,24 +36,25 @@ that none of it takes you by surprise.
 ### Why it isn't on the Play Store
 
 Putting an app on the Play Store costs money, requires a verified developer identity, and
-takes weeks of review. Anchor is free, has no ads, collects nothing, and makes me nothing. 
-I built it for myself, and I'm sharing it because it might help other Christians - and anyone trying to get their screen time under control!
+takes weeks of review. Anchor is free, has no ads, collects nothing, and makes me nothing.
+I built it for myself, and I'm sharing it because it might help other Christians — and
+honestly anyone trying to get their screen time under control.
 
-Having this app off the app store means you're going to see a bunch of warning screens while installing! Sorry haha
+That decision has a cost, and you're about to pay it in warning screens.
 
 ### The other reason it looks scary
 
 Anchor genuinely does ask for powerful permissions. It has to. To block an app or a
 website, something has to be able to see which app is open and what's in your browser's
-address bar. There is no gentler way to do that on Android — every App/Website blocker app works this way.
+address bar. There is no gentler way to do that on Android — every blocker works this way.
 
-Android can't automatically tell the difference between an app that reads your screen to block Reddit and
+Android can't tell the difference between an app that reads your screen to block Reddit and
 one that reads your screen to steal your banking password. So it warns you as though it's
 the second one. That's the right call by Android, and it's why the warnings exist.
 
-**But please don't just take my word for any of this."Trust me bro" from a stranger on
+**But please don't just take my word for any of this.** "Trust me bro" from a stranger on
 the internet should mean nothing to you, especially about an app asking for permissions
-this powerful.** If I'm asking you to hand over that much access, the burden is on me to let
+this powerful. If I'm asking you to hand over that much access, the burden is on me to let
 you check, not on you to take it on faith.
 
 So check it:
@@ -65,14 +69,15 @@ So check it:
 - **Search the warnings themselves.** "Unsafe app blocked", "restricted setting",
   "unknown sources" — see what people say about what those actually mean.
 
-**I'd genuinely rather you spent twenty minutes checking and then installed it with your eyes
-open, than installing it nervously, with a fear in the back of your mind about the app.** I don't want you to be scared off installing something I think can genuinely help you~!
+I'd genuinely rather you spent twenty minutes checking and then installed it with your eyes
+open, than installed it nervously because I sounded convincing. And I'd rather you didn't
+install it at all than get frightened off something I really do think can help.
 
 ### What you'll actually see, step by step
 
-You'll hit roughly five or six of these, depending on your phone settings etc. Every one is normal.
+You'll hit roughly five or six of these. Every one is normal.
 
-**1. Downloading the APK file in Github**
+**1. Downloading the file**
 Your browser will say something like *"This type of file can harm your device. Do you want
 to keep anchor-1.1.apk anyway?"*
 → Tap **Download anyway** or **OK**.
@@ -85,7 +90,7 @@ install unknown apps from this source."*
 **3. Play Protect**
 Google will scan it and may say *"Unsafe app blocked"* or *"App scan recommended"*.
 → Tap **More details**, then **Install anyway**. If it offers to send the app to Google for
-scanning, you can say yes or no — either is fine. If this doesn't work you may need to turn app scanning off for now (turn it back on once app is all set up if you like)
+scanning, you can say yes or no — either is fine.
 
 **4. Samsung phones only: Auto Blocker**
 Newer Samsungs ship with Auto Blocker on, which refuses sideloaded apps outright.
@@ -115,6 +120,18 @@ button that turns blocking off in one tap, which rather defeats the point.
 If you turn this on later, you'll get one more approval screen about a **device
 administrator**. This is what stops you deleting the app in a weak moment.
 
+### One thing I'm still checking
+
+A friend reported that after installing Anchor, his tap-and-pay stopped working and Google
+Wallet asked him to add his cards again. **I haven't confirmed Anchor caused this**, and it
+may well be coincidence — Wallet removes cards for lots of reasons.
+
+But the honest answer is I don't know yet, and I'd rather tell you now than have it surprise
+you. If it matters to you, **leave uninstall protection off** until I've got to the bottom of
+it. That's the feature most likely to be involved, and everything else works fine without it.
+
+If it does happen to you, re-adding the card in Google Wallet fixes it — and please open an
+issue here, because it would help me work out what's going on.
 
 ### Then you're in
 

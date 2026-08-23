@@ -66,6 +66,11 @@ fun SettingsScreen() {
         }
     }
 
+    var emgQuota by remember { mutableIntStateOf(prefs.emergencyQuota) }
+    var emgMinutes by remember { mutableIntStateOf(prefs.emergencyMinutes) }
+    var warnings by remember { mutableStateOf(prefs.warningsOn) }
+    var resetDialog by remember { mutableStateOf(false) }
+
     var pinDialog by remember { mutableStateOf(false) }
     var confirmDisable by remember { mutableStateOf(false) }
 
@@ -310,6 +315,71 @@ fun SettingsScreen() {
 
         Divider24()
 
+        // ---- emergency extensions ----
+        Section("EMERGENCY EXTENSIONS")
+        Text(
+            "Sometimes an allowance runs out mid-conversation and whoever holds your PIN isn't " +
+                "around. Rather than leave you stuck, Anchor gives you a small number of " +
+                "extensions each week that don't need the PIN — just a short wait.",
+            style = MaterialTheme.typography.bodyMedium
+        )
+        Spacer(Modifier.height(10.dp))
+        Text(
+            "The limit is the point. A couple a week gets spent on things that matter; it " +
+                "doesn't work as a daily habit.",
+            style = MaterialTheme.typography.bodyMedium,
+            color = Ink.Dim
+        )
+        Spacer(Modifier.height(16.dp))
+        Text("HOW MANY A WEEK", style = Eyebrow, color = Ink.Dim)
+        Spacer(Modifier.height(10.dp))
+        Chips(
+            options = listOf(0 to "None", 1 to "1", 2 to "2", 3 to "3"),
+            selected = emgQuota
+        ) { picked ->
+            if (picked <= emgQuota) {
+                emgQuota = picked; prefs.emergencyQuota = picked
+            } else {
+                gate.loosen("Allowing more emergency extensions each week.") {
+                    emgQuota = picked; prefs.emergencyQuota = picked
+                }
+            }
+        }
+        Spacer(Modifier.height(16.dp))
+        Text("HOW LONG EACH", style = Eyebrow, color = Ink.Dim)
+        Spacer(Modifier.height(10.dp))
+        Chips(
+            options = listOf(5 to "5 min", 10 to "10 min", 15 to "15 min", 30 to "30 min"),
+            selected = emgMinutes
+        ) { picked ->
+            if (picked <= emgMinutes) {
+                emgMinutes = picked; prefs.emergencyMinutes = picked
+            } else {
+                gate.loosen("Making each emergency extension longer.") {
+                    emgMinutes = picked; prefs.emergencyMinutes = picked
+                }
+            }
+        }
+        Spacer(Modifier.height(12.dp))
+        Text(
+            "${prefs.emergenciesLeft()} of $emgQuota left this week.",
+            style = MaterialTheme.typography.bodyMedium,
+            color = Ink.Brass
+        )
+
+        Divider24()
+
+        // ---- warnings ----
+        Section("TIME WARNINGS")
+        ToggleRow(
+            label = "Warn me before time runs out",
+            body = "A brief note at the bottom of the screen about a minute before an allowance " +
+                "ends, and five minutes before on limits of ten minutes or more.",
+            checked = warnings
+        ) { warnings = it; prefs.warningsOn = it }
+
+        Divider24()
+
         // ---- pause ----
         Section("THE PAUSE")
         Text(
@@ -351,6 +421,43 @@ fun SettingsScreen() {
             style = MaterialTheme.typography.bodyMedium, color = Ink.Dim
         )
 
+        if (prefs.hasPin) {
+            Spacer(Modifier.height(20.dp))
+            val resetAt = prefs.pinResetAt()
+            val remaining = if (resetAt > 0) ((resetAt - now) / 1000).coerceAtLeast(0) else -1L
+            when {
+                resetAt == 0L -> Text(
+                    "FORGOTTEN THE PIN?",
+                    style = Eyebrow,
+                    color = Ink.Slate,
+                    modifier = Modifier.clickable { resetDialog = true }
+                )
+                remaining > 0 -> Column {
+                    Text("PIN RESET REQUESTED", style = Eyebrow, color = Ink.Rust)
+                    Spacer(Modifier.height(8.dp))
+                    Text(
+                        "Your PIN clears in ${days(remaining)}. Everything stays locked until then.",
+                        style = MaterialTheme.typography.bodyMedium
+                    )
+                    Spacer(Modifier.height(12.dp))
+                    Text(
+                        "CANCEL THE RESET",
+                        style = Eyebrow,
+                        color = Ink.Brass,
+                        modifier = Modifier.clickable { prefs.cancelPinReset() }
+                    )
+                }
+                else -> Column {
+                    Text("THE WAIT IS OVER", style = Eyebrow, color = Ink.Brass)
+                    Spacer(Modifier.height(10.dp))
+                    PrimaryAction("Clear the PIN and set a new one") {
+                        prefs.clearPin()
+                        pinDialog = true
+                    }
+                }
+            }
+        }
+
         Divider24()
 
         Section("WHAT ANCHOR IS SEEING")
@@ -383,6 +490,33 @@ fun SettingsScreen() {
             check = { prefs.checkPin(it) },
             onSet = { prefs.setPin(it); pinDialog = false },
             onDismiss = { pinDialog = false }
+        )
+    }
+
+    if (resetDialog) {
+        AlertDialog(
+            onDismissRequest = { resetDialog = false },
+            containerColor = Ink.Surface,
+            title = { Text("Reset the PIN?", style = MaterialTheme.typography.titleMedium) },
+            text = {
+                Text(
+                    "This takes seven days, and it can't be shortened. Nothing unlocks in the " +
+                        "meantime — the wait is what stops this being a way around your own " +
+                        "blocks. You can cancel it at any point.\n\nIf whoever holds your PIN is " +
+                        "reachable, asking them is faster.",
+                    style = MaterialTheme.typography.bodyMedium
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = { prefs.startPinReset(); resetDialog = false }) {
+                    Text("Start the seven days", color = Ink.Rust)
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { resetDialog = false }) {
+                    Text("Cancel", color = Ink.Brass)
+                }
+            }
         )
     }
 
@@ -592,6 +726,16 @@ private fun clock(seconds: Long): String {
     val m = (seconds % 3600) / 60
     val s = seconds % 60
     return if (h > 0) "%d:%02d:%02d".format(h, m, s) else "%d:%02d".format(m, s)
+}
+
+private fun days(seconds: Long): String {
+    val d = seconds / 86_400
+    val h = (seconds % 86_400) / 3600
+    return when {
+        d > 0 -> "$d day${if (d == 1L) "" else "s"}, $h hour${if (h == 1L) "" else "s"}"
+        h > 0 -> "$h hour${if (h == 1L) "" else "s"}"
+        else -> "${(seconds / 60).coerceAtLeast(1)} minutes"
+    }
 }
 
 private fun humanMinutes(m: Int) = when {

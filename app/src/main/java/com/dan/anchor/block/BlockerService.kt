@@ -28,6 +28,9 @@ class BlockerService : AccessibilityService() {
      */
     private val worker = HandlerThread("anchor-watch").apply { start() }
     private val handler = Handler(worker.looper)
+
+    /** Toasts have to be raised on the main thread. */
+    private val uiHandler = Handler(android.os.Looper.getMainLooper())
     private val power by lazy { getSystemService(POWER_SERVICE) as android.os.PowerManager }
 
     /**
@@ -263,13 +266,17 @@ class BlockerService : AccessibilityService() {
     // ---------- daily limit tracking ----------
 
     private fun startTrackingIfLimited(target: String) {
-        val limited = prefs.rules.value.firstOrNull {
-            it.target == target && !it.isHardBlock
-        } ?: run { stopTracking(); return }
+        val rules = prefs.rules.value
+        // Either it has an allowance of its own, or it's the gate app for
+        // something else — both need their minutes counted.
+        val tracked = rules.any { it.target == target && !it.isHardBlock } ||
+            rules.any { it.hasGate && it.gateApp == target }
 
-        if (currentTrackedTarget != limited.target) {
+        if (!tracked) { stopTracking(); return }
+
+        if (currentTrackedTarget != target) {
             flushUsage(force = true)
-            currentTrackedTarget = limited.target
+            currentTrackedTarget = target
             trackingSince = System.currentTimeMillis()
         }
     }
@@ -352,6 +359,8 @@ class BlockerService : AccessibilityService() {
                     }
                 }
 
+                checkWarnings()
+
                 // Has an allowance run out mid-session?
                 val t = currentTrackedTarget
                 if (t != null) {
@@ -373,18 +382,58 @@ class BlockerService : AccessibilityService() {
         }
     }
 
+    /**
+     * A quiet heads-up before an allowance runs out.
+     *
+     * The five-minute mark is skipped on short limits — on a ten-minute
+     * allowance it would land at halfway, which is a progress report rather
+     * than a warning.
+     */
+    private fun checkWarnings() {
+        if (!prefs.warningsOn) return
+        val t = currentTrackedTarget ?: return
+        val rule = prefs.rules.value.firstOrNull { it.target == t } ?: return
+        if (rule.isHardBlock) return
+        if (prefs.emergencyActive(t)) return
+
+        val leftMs = rule.limitMinutes * 60_000L - usedMillisIncludingSession(t)
+        val leftMin = (leftMs / 60_000L).toInt()
+
+        val threshold = when {
+            leftMs in 1..60_000L && !prefs.warningShown(t, 1) -> 1
+            leftMin in 4..5 && rule.limitMinutes >= 10 && !prefs.warningShown(t, 5) -> 5
+            else -> return
+        }
+
+        prefs.markWarningShown(t, threshold)
+        val name = rule.publicLabel
+        val text = if (threshold == 1) "About a minute left on $name."
+        else "About five minutes left on $name."
+
+        handler.post {
+            uiHandler.post {
+                runCatching { android.widget.Toast.makeText(this, text, android.widget.Toast.LENGTH_LONG).show() }
+            }
+        }
+    }
+
     // ---------- showing the block screen ----------
 
     private fun fire(decision: Decision.Block, key: String) {
         if (BlockOverlayActivity.showing) return
         val now = System.currentTimeMillis()
-        // Generous window: relaunching swaps the verse mid-read, which is worse
-        // than briefly missing a genuine second block.
-        if (key == lastBlockedKey && now - lastBlockAt < 8_000L) return
+        // Just long enough to stop an event and the poll launching two screens
+        // at once. Anything longer becomes a window you can scroll in — an
+        // earlier 8-second version left the blocked app usable that whole time.
+        if (key == lastBlockedKey && now - lastBlockAt < 600L) return
         lastBlockedKey = key
         lastBlockAt = now
 
         prefs.blockCount += 1
+
+        // Background the blocked app before the verse appears, so it isn't
+        // sitting one back-swipe away.
+        runCatching { performGlobalAction(GLOBAL_ACTION_HOME) }
 
         val i = Intent(this, BlockOverlayActivity::class.java).apply {
             addFlags(
@@ -394,6 +443,10 @@ class BlockerService : AccessibilityService() {
             )
             putExtra(BlockOverlayActivity.EXTRA_LABEL, decision.label)
             putExtra(BlockOverlayActivity.EXTRA_REASON, decision.reason.name)
+            putExtra(BlockOverlayActivity.EXTRA_TARGET, decision.target)
+            putExtra(BlockOverlayActivity.EXTRA_GATE_LABEL, decision.gateLabel)
+            putExtra(BlockOverlayActivity.EXTRA_GATE_DONE, decision.gateDone)
+            putExtra(BlockOverlayActivity.EXTRA_GATE_NEEDED, decision.gateNeeded)
         }
         startActivity(i)
     }

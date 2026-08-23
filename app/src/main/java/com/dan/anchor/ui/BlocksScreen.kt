@@ -80,12 +80,17 @@ fun BlocksScreen() {
         val unblocking = previous != null && previous.isHardBlock && !rule.isHardBlock
         // Narrowing the hours it applies means blocked for less of the week.
         val shorterHours = previous != null && rule.coverageMinutes() < previous.coverageMinutes()
+        // Dropping the gate, or asking less of it, makes the rule easier to get past.
+        val weakerGate = previous != null && previous.hasGate &&
+            (!rule.hasGate || rule.gateMinutes < previous.gateMinutes)
 
-        if (moreTime || unblocking || shorterHours) {
+        if (moreTime || unblocking || shorterHours || weakerGate) {
             val what = if (previous.hidden) "a private block" else previous.label
-            val why = if (shorterHours && !moreTime && !unblocking)
-                "Blocking $what for fewer hours than before."
-            else "Giving $what more time than it had."
+            val why = when {
+                weakerGate && !moreTime && !unblocking -> "Making $what easier to unlock."
+                shorterHours && !moreTime && !unblocking -> "Blocking $what for fewer hours than before."
+                else -> "Giving $what more time than it had."
+            }
             gate.loosen(why) {
                 if (replacing != null && replacing.target != rule.target) prefs.removeRule(replacing)
                 prefs.upsertRule(rule)
@@ -261,9 +266,12 @@ fun BlocksScreen() {
         is Sheet.App -> AppSheet(
             existing = sh.rule,
             onDismiss = { sheet = null }
-        ) { pkg, label, mins, priv, sc ->
+        ) { pkg, label, mins, priv, sc, ga, gl, gm ->
             save(
-                Rule(pkg, label, isApp = true, limitMinutes = mins, hidden = priv, schedule = sc),
+                Rule(
+                    pkg, label, isApp = true, limitMinutes = mins, hidden = priv, schedule = sc,
+                    gateApp = ga, gateLabel = gl, gateMinutes = gm
+                ),
                 sh.rule
             )
             sheet = null
@@ -271,9 +279,12 @@ fun BlocksScreen() {
         is Sheet.Site -> SiteSheet(
             existing = sh.rule,
             onDismiss = { sheet = null }
-        ) { host, mins, priv, sc ->
+        ) { host, mins, priv, sc, ga, gl, gm ->
             save(
-                Rule(host, host, isApp = false, limitMinutes = mins, hidden = priv, schedule = sc),
+                Rule(
+                    host, host, isApp = false, limitMinutes = mins, hidden = priv, schedule = sc,
+                    gateApp = ga, gateLabel = gl, gateMinutes = gm
+                ),
                 sh.rule
             )
             sheet = null
@@ -381,6 +392,7 @@ private fun RuleRow(
                     append(" · ")
                     if (rule.isHardBlock) append("always blocked")
                     else append("$usedMinutes of ${rule.limitMinutes} min used today")
+                    if (rule.hasGate) append(" · after ${rule.gateMinutes}m ${rule.gateLabel}")
                     rule.schedule?.let { sc ->
                         append(" · ")
                         append(
@@ -431,7 +443,7 @@ private fun AddButton(label: String, modifier: Modifier = Modifier, onClick: () 
 private fun AppSheet(
     existing: Rule?,
     onDismiss: () -> Unit,
-    onSave: (String, String, Int, Boolean, Schedule?) -> Unit
+    onSave: (String, String, Int, Boolean, Schedule?, String?, String, Int) -> Unit
 ) {
     val ctx = LocalContext.current
     var apps by remember { mutableStateOf<List<Pair<String, String>>>(emptyList()) }
@@ -442,6 +454,9 @@ private fun AppSheet(
     var minutes by remember { mutableStateOf(existing?.limitMinutes?.toString() ?: "0") }
     var priv by remember { mutableStateOf(existing?.hidden ?: false) }
     var sched by remember { mutableStateOf(existing?.schedule) }
+    var gateApp by remember { mutableStateOf(existing?.gateApp) }
+    var gateLabel by remember { mutableStateOf(existing?.gateLabel ?: "") }
+    var gateMins by remember { mutableIntStateOf(existing?.gateMinutes ?: 0) }
 
     LaunchedEffect(Unit) { apps = launchableApps(ctx) }
 
@@ -481,11 +496,20 @@ private fun AppSheet(
                 LimitPicker(minutes) { minutes = it }
                 Spacer(Modifier.height(24.dp))
                 ScheduleEditor(sched) { sched = it }
+                if ((minutes.toIntOrNull() ?: 0) > 0) {
+                    Spacer(Modifier.height(24.dp))
+                    GateEditor(apps, gateApp, gateLabel, gateMins) { a, l, m ->
+                        gateApp = a; gateLabel = l; gateMins = m
+                    }
+                }
                 Spacer(Modifier.height(24.dp))
                 PrivateToggle(priv) { priv = it }
                 Spacer(Modifier.height(24.dp))
                 PrimaryAction(if (existing != null) "Save changes" else "Add block") {
-                    onSave(selected!!.first, selected!!.second, minutes.toIntOrNull() ?: 0, priv, sched)
+                    onSave(
+                        selected!!.first, selected!!.second, minutes.toIntOrNull() ?: 0,
+                        priv, sched, gateApp, gateLabel, gateMins
+                    )
                 }
                 }
             }
@@ -498,12 +522,18 @@ private fun AppSheet(
 private fun SiteSheet(
     existing: Rule?,
     onDismiss: () -> Unit,
-    onSave: (String, Int, Boolean, Schedule?) -> Unit
+    onSave: (String, Int, Boolean, Schedule?, String?, String, Int) -> Unit
 ) {
     var host by remember { mutableStateOf(existing?.target ?: "") }
     var minutes by remember { mutableStateOf(existing?.limitMinutes?.toString() ?: "0") }
     var priv by remember { mutableStateOf(existing?.hidden ?: false) }
     var sched by remember { mutableStateOf(existing?.schedule) }
+    var gateApp by remember { mutableStateOf(existing?.gateApp) }
+    var gateLabel by remember { mutableStateOf(existing?.gateLabel ?: "") }
+    var gateMins by remember { mutableIntStateOf(existing?.gateMinutes ?: 0) }
+    var apps by remember { mutableStateOf<List<Pair<String, String>>>(emptyList()) }
+    val ctx = LocalContext.current
+    LaunchedEffect(Unit) { apps = launchableApps(ctx) }
     val clean = BlockRules.host(host)
 
     ModalBottomSheet(onDismissRequest = onDismiss, containerColor = Ink.Surface) {
@@ -530,6 +560,12 @@ private fun SiteSheet(
             LimitPicker(minutes) { minutes = it }
             Spacer(Modifier.height(24.dp))
             ScheduleEditor(sched) { sched = it }
+            if ((minutes.toIntOrNull() ?: 0) > 0) {
+                Spacer(Modifier.height(24.dp))
+                GateEditor(apps, gateApp, gateLabel, gateMins) { a, l, m ->
+                    gateApp = a; gateLabel = l; gateMins = m
+                }
+            }
             Spacer(Modifier.height(24.dp))
             PrivateToggle(priv) { priv = it }
             Spacer(Modifier.height(24.dp))
@@ -537,7 +573,7 @@ private fun SiteSheet(
                 if (existing != null) "Save changes" else "Add block",
                 enabled = clean.contains('.')
             ) {
-                onSave(clean, minutes.toIntOrNull() ?: 0, priv, sched)
+                onSave(clean, minutes.toIntOrNull() ?: 0, priv, sched, gateApp, gateLabel, gateMins)
             }
         }
     }
@@ -657,6 +693,117 @@ private fun TimeChip(label: String, modifier: Modifier = Modifier, onClick: () -
         contentAlignment = Alignment.Center
     ) {
         Text(label, style = MaterialTheme.typography.bodyLarge, color = Ink.Brass)
+    }
+}
+
+/**
+ * "Unlocks after": the thing you actually want to do has to happen first.
+ *
+ * Note this never grants extra minutes — the daily limit is unchanged. Doing
+ * twenty minutes in the gate app instead of ten buys nothing, which is what
+ * stops it becoming a currency you can farm.
+ */
+@Composable
+private fun GateEditor(
+    apps: List<Pair<String, String>>,
+    gateApp: String?,
+    gateLabel: String,
+    gateMinutes: Int,
+    onChange: (String?, String, Int) -> Unit
+) {
+    var picking by remember { mutableStateOf(false) }
+    var query by remember { mutableStateOf("") }
+    val on = gateApp != null
+
+    Column {
+        Row(verticalAlignment = Alignment.Top) {
+            Column(Modifier.weight(1f)) {
+                Text("Unlocks after another app", style = MaterialTheme.typography.bodyLarge)
+                Spacer(Modifier.height(4.dp))
+                Text(
+                    "Blocked until you've put time into something else first. Doesn't change " +
+                        "the daily limit — it just decides when it starts.",
+                    style = MaterialTheme.typography.bodyMedium
+                )
+            }
+            Spacer(Modifier.width(16.dp))
+            Switch(
+                checked = on,
+                onCheckedChange = { picking = it; if (!it) onChange(null, "", 0) },
+                colors = SwitchDefaults.colors(
+                    checkedThumbColor = Ink.Void,
+                    checkedTrackColor = Ink.Brass,
+                    uncheckedThumbColor = Ink.Slate,
+                    uncheckedTrackColor = Ink.Raised,
+                    uncheckedBorderColor = Ink.Hairline
+                )
+            )
+        }
+
+        if (on || picking) {
+            Spacer(Modifier.height(16.dp))
+            if (gateApp == null || picking) {
+                Text("WHICH APP FIRST", style = Eyebrow, color = Ink.Dim)
+                Spacer(Modifier.height(10.dp))
+                Field(query, { query = it }, "Search apps")
+                Spacer(Modifier.height(8.dp))
+                LazyColumn(Modifier.heightIn(max = 220.dp)) {
+                    items(apps.filter { it.second.contains(query, true) }, key = { it.first }) { (pkg, label) ->
+                        Text(
+                            label,
+                            style = MaterialTheme.typography.bodyLarge,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable {
+                                    onChange(pkg, label, if (gateMinutes > 0) gateMinutes else 10)
+                                    picking = false
+                                    query = ""
+                                }
+                                .padding(vertical = 12.dp)
+                        )
+                        Box(Modifier.fillMaxWidth().height(1.dp).background(Ink.Hairline))
+                    }
+                }
+            } else {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(gateLabel, style = MaterialTheme.typography.titleMedium)
+                    Spacer(Modifier.weight(1f))
+                    Text(
+                        "CHANGE",
+                        style = Eyebrow,
+                        color = Ink.Brass,
+                        modifier = Modifier.clickable { picking = true }
+                    )
+                }
+                Spacer(Modifier.height(16.dp))
+                Text("MINUTES REQUIRED", style = Eyebrow, color = Ink.Dim)
+                Spacer(Modifier.height(10.dp))
+                Row(
+                    Modifier.horizontalScroll(rememberScrollState()),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    listOf(5, 10, 15, 20, 30).forEach { m ->
+                        val sel = gateMinutes == m
+                        Text(
+                            "$m min",
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = if (sel) Ink.Void else Ink.Bone,
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(8.dp))
+                                .background(if (sel) Ink.Brass else Ink.Raised)
+                                .clickable { onChange(gateApp, gateLabel, m) }
+                                .padding(horizontal = 14.dp, vertical = 10.dp)
+                        )
+                    }
+                }
+                Spacer(Modifier.height(10.dp))
+                Text(
+                    "Blocked until you've spent $gateMinutes minutes in $gateLabel today.",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = Ink.Dim
+                )
+            }
+        }
     }
 }
 

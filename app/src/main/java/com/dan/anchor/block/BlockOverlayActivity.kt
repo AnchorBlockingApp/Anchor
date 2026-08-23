@@ -53,6 +53,10 @@ class BlockOverlayActivity : ComponentActivity() {
 
         val label = intent.getStringExtra(EXTRA_LABEL) ?: "that"
         val reason = intent.getStringExtra(EXTRA_REASON) ?: Decision.Reason.RULE.name
+        val target = intent.getStringExtra(EXTRA_TARGET).orEmpty()
+        val gateLabel = intent.getStringExtra(EXTRA_GATE_LABEL).orEmpty()
+        val gateDone = intent.getIntExtra(EXTRA_GATE_DONE, 0)
+        val gateNeeded = intent.getIntExtra(EXTRA_GATE_NEEDED, 0)
 
         setContent {
             AnchorTheme {
@@ -63,7 +67,19 @@ class BlockOverlayActivity : ComponentActivity() {
                     verse = verse,
                     label = label,
                     reason = reason,
+                    gateLabel = gateLabel,
+                    gateDone = gateDone,
+                    gateNeeded = gateNeeded,
                     pauseSeconds = prefs.pauseSeconds,
+                    emergenciesLeft = prefs.emergenciesLeft(),
+                    canExtend = target.isNotBlank() &&
+                        reason != Decision.Reason.ADULT.name &&
+                        reason != Decision.Reason.SELF_DEFENCE.name &&
+                        reason != Decision.Reason.RULE.name,
+                    onExtend = {
+                        prefs.grantEmergency(target)
+                        goHome()
+                    },
                     onDismiss = { goHome() },
                     onOpenPassage = { openPassage(verse.book, verse.chapter, verse.verseStart) }
                 )
@@ -118,6 +134,10 @@ class BlockOverlayActivity : ComponentActivity() {
     companion object {
         const val EXTRA_LABEL = "label"
         const val EXTRA_REASON = "reason"
+        const val EXTRA_TARGET = "target"
+        const val EXTRA_GATE_LABEL = "gate_label"
+        const val EXTRA_GATE_DONE = "gate_done"
+        const val EXTRA_GATE_NEEDED = "gate_needed"
         const val EXTRA_OPEN_BOOK = "open_book"
         const val EXTRA_OPEN_CHAPTER = "open_chapter"
         const val EXTRA_OPEN_VERSE = "open_verse"
@@ -137,10 +157,26 @@ private fun BlockScreen(
     verse: BlockVerse,
     label: String,
     reason: String,
+    gateLabel: String,
+    gateDone: Int,
+    gateNeeded: Int,
     pauseSeconds: Int,
+    emergenciesLeft: Int,
+    canExtend: Boolean,
+    onExtend: () -> Unit,
     onDismiss: () -> Unit,
     onOpenPassage: () -> Unit
 ) {
+    var extendStep by remember { mutableIntStateOf(0) }
+    var extendWait by remember { mutableIntStateOf(60) }
+
+    LaunchedEffect(extendStep) {
+        if (extendStep == 1) {
+            extendWait = 60
+            while (extendWait > 0) { delay(1_000); extendWait -= 1 }
+        }
+    }
+
     var elapsed by remember { mutableIntStateOf(0) }
     val done = elapsed >= pauseSeconds
 
@@ -172,10 +208,31 @@ private fun BlockScreen(
             Text(headerFor(reason), style = Eyebrow)
             Spacer(Modifier.height(10.dp))
             Text(
-                subheadFor(reason, label),
+                if (reason == Decision.Reason.GATED.name)
+                    "$label opens up after $gateNeeded minutes in $gateLabel. " +
+                        "You've done $gateDone so far today."
+                else subheadFor(reason, label),
                 style = MaterialTheme.typography.bodyMedium,
                 color = Ink.Dim
             )
+
+            if (reason == Decision.Reason.GATED.name && gateNeeded > 0) {
+                Spacer(Modifier.height(16.dp))
+                Box(
+                    Modifier
+                        .fillMaxWidth()
+                        .height(2.dp)
+                        .clip(RoundedCornerShape(1.dp))
+                        .background(Ink.Hairline)
+                ) {
+                    Box(
+                        Modifier
+                            .fillMaxWidth((gateDone.toFloat() / gateNeeded).coerceIn(0f, 1f))
+                            .fillMaxHeight()
+                            .background(Ink.BrassDim)
+                    )
+                }
+            }
 
             Spacer(Modifier.height(48.dp))
 
@@ -233,6 +290,38 @@ private fun BlockScreen(
                 TextButton(onClick = onDismiss) {
                     Text("Go back", style = Eyebrow, color = Ink.Bone)
                 }
+
+                if (canExtend && emergenciesLeft > 0) {
+                    Spacer(Modifier.height(8.dp))
+                    when (extendStep) {
+                        0 -> TextButton(onClick = { extendStep = 1 }) {
+                            Text(
+                                "I NEED A FEW MINUTES  ·  $emergenciesLeft LEFT THIS WEEK",
+                                style = Eyebrow, color = Ink.Dim
+                            )
+                        }
+                        1 -> Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                            Text(
+                                "Two a week. Worth being sure this is one of them.",
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = Ink.Dim,
+                                textAlign = TextAlign.Center
+                            )
+                            Spacer(Modifier.height(12.dp))
+                            if (extendWait > 0) {
+                                Text("$extendWait", style = Eyebrow, color = Ink.Dim)
+                            } else {
+                                TextButton(onClick = onExtend) {
+                                    Text("USE ONE NOW", style = Eyebrow, color = Ink.Brass)
+                                }
+                            }
+                            Spacer(Modifier.height(4.dp))
+                            TextButton(onClick = { extendStep = 0 }) {
+                                Text("NEVER MIND", style = Eyebrow, color = Ink.Slate)
+                            }
+                        }
+                    }
+                }
             } else {
                 Text(
                     "${pauseSeconds - elapsed}",
@@ -247,6 +336,7 @@ private fun BlockScreen(
 
 private fun headerFor(reason: String): String = when (reason) {
     Decision.Reason.LIMIT_REACHED.name -> "TIME'S UP"
+    Decision.Reason.GATED.name -> "NOT YET"
     Decision.Reason.ADULT.name -> "FILTERED"
     Decision.Reason.SELF_DEFENCE.name -> "STILL LOCKED"
     else -> "BLOCKED"
