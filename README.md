@@ -22,6 +22,8 @@ Everything stays on your phone. No account, no sync, no ads, nothing uploaded.
 
 Scripture is the World English Bible, which is public domain, so there's nothing to license.
 
+Android only. This won't work on an iPhone or iPad - sorry.
+
 ---
 
 ## Read this before you install
