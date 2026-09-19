@@ -6,6 +6,7 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -70,9 +71,10 @@ fun SettingsScreen() {
     var emgMinutes by remember { mutableIntStateOf(prefs.emergencyMinutes) }
     var warnings by remember { mutableStateOf(prefs.warningsOn) }
     var resetDialog by remember { mutableStateOf(false) }
+    var lockDays by remember { mutableStateOf("") }
+    var confirmDaysLock by remember { mutableStateOf(false) }
 
     var pinDialog by remember { mutableStateOf(false) }
-    var confirmDisable by remember { mutableStateOf(false) }
 
     Column(
         Modifier
@@ -102,8 +104,9 @@ fun SettingsScreen() {
         )
         Spacer(Modifier.height(10.dp))
         Text(
-            "With it on, you enter your PIN to start a timer, then have to wait for that timer to " +
-                "run out before the change is allowed. Adding a block is unaffected either way.",
+            "With it on, you start a timer instead, and have to wait for it to run out before any " +
+                "change is allowed. Starting the timer needs no PIN — the wait is the point. The " +
+                "PIN is still needed for the change itself. Adding a block is unaffected either way.",
             style = MaterialTheme.typography.bodyMedium
         )
         Spacer(Modifier.height(10.dp))
@@ -125,16 +128,72 @@ fun SettingsScreen() {
             } else {
                 Text("COOLDOWN LENGTH", style = Eyebrow, color = Ink.Dim)
                 Spacer(Modifier.height(10.dp))
-                Chips(
-                    options = listOf(15 to "15 min", 60 to "1 hour", 240 to "4 hours", 1440 to "24 hours"),
-                    selected = cooldown
-                ) { cooldown = it; prefs.cooldownMinutes = it }
+                var daysMode by remember { mutableStateOf(false) }
+
+                Text("HOW LONG BEFORE A CHANGE IS ALLOWED", style = Eyebrow, color = Ink.Dim)
+                Spacer(Modifier.height(10.dp))
+                Row(
+                    Modifier.horizontalScroll(rememberScrollState()),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    listOf(15 to "15 min", 60 to "1 hour", 240 to "4 hours", 1440 to "24 hours")
+                        .forEach { (v, lab) ->
+                            val on = !daysMode && cooldown == v
+                            Text(
+                                lab,
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = if (on) Ink.Void else Ink.Bone,
+                                modifier = Modifier
+                                    .clip(RoundedCornerShape(8.dp))
+                                    .background(if (on) Ink.Brass else Ink.Raised)
+                                    .clickable {
+                                        daysMode = false; lockDays = ""
+                                        cooldown = v; prefs.cooldownMinutes = v
+                                    }
+                                    .padding(horizontal = 12.dp, vertical = 10.dp)
+                            )
+                        }
+                    Text(
+                        "X days",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = if (daysMode) Ink.Void else Ink.Bone,
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(8.dp))
+                            .background(if (daysMode) Ink.Brass else Ink.Raised)
+                            .clickable { daysMode = true }
+                            .padding(horizontal = 12.dp, vertical = 10.dp)
+                    )
+                }
+
+                if (daysMode) {
+                    Spacer(Modifier.height(16.dp))
+                    Text(
+                        "Strict mode stays on for this many days, and nothing loosens it in the " +
+                            "meantime — not a cooldown, not your PIN.",
+                        style = MaterialTheme.typography.bodyMedium
+                    )
+                    Spacer(Modifier.height(10.dp))
+                    Field(
+                        value = lockDays,
+                        onChange = { raw -> lockDays = raw.filter { it.isDigit() }.take(3) },
+                        hint = "e.g. 7",
+                        numeric = true
+                    )
+                }
+
                 Spacer(Modifier.height(16.dp))
-                PrimaryAction("Arm strict mode") { prefs.enableStrict(cooldown) }
+                val days = if (daysMode) lockDays.toIntOrNull() ?: 0 else 0
+                PrimaryAction(
+                    if (days > 0) "Arm for $days day${if (days == 1) "" else "s"}" else "Arm strict mode",
+                    enabled = !daysMode || days > 0
+                ) {
+                    if (days > 0) confirmDaysLock = true else prefs.enableStrict(cooldown)
+                }
             }
         } else {
             val at = prefs.unlockAt()
             val remaining = if (at > 0) ((at - now) / 1000).coerceAtLeast(0) else -1L
+            val lockLeft = prefs.daysLockRemaining()
             Column(
                 Modifier
                     .fillMaxWidth()
@@ -144,37 +203,47 @@ fun SettingsScreen() {
                     .padding(18.dp)
             ) {
                 when {
+                    lockLeft > 0L -> {
+                        Text("LOCKED FOR A SET TIME", style = Eyebrow, color = Ink.Brass)
+                        Spacer(Modifier.height(10.dp))
+                        Text(
+                            "Nothing can be loosened until ${endsOn(prefs.strictUntil())}.",
+                            style = MaterialTheme.typography.bodyLarge
+                        )
+                        Spacer(Modifier.height(8.dp))
+                        Text(
+                            "${daysHours(lockLeft)} to go. You chose this — see it through.",
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = Ink.Dim
+                        )
+                    }
                     at == 0L -> {
                         Text("Armed. Rules are frozen.", style = MaterialTheme.typography.bodyLarge)
                         Spacer(Modifier.height(14.dp))
+                        // No PIN here — the wait is the price, and this starts it.
                         PrimaryAction("Start the ${humanMinutes(cooldown)} wait") {
-                            gate.loosen("Starting the wait that unlocks your rules.") {
-                                prefs.requestUnlock()
-                            }
+                            prefs.requestUnlock()
                         }
                     }
-                    remaining > 0 -> {
+                    else -> {
                         Text("Unlocking in", style = MaterialTheme.typography.bodyMedium, color = Ink.Dim)
                         Spacer(Modifier.height(6.dp))
                         Text(clock(remaining), style = ScriptureLarge, color = Ink.Brass)
+                        Spacer(Modifier.height(8.dp))
+                        Text(
+                            "Strict mode switches itself off when this reaches zero.",
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = Ink.Dim
+                        )
                         Spacer(Modifier.height(14.dp))
                         Text(
                             "CANCEL AND STAY LOCKED",
                             style = Eyebrow, color = Ink.Slate,
-                            modifier = Modifier.clickable { prefs.cancelUnlockRequest() }
-                        )
-                    }
-                    else -> {
-                        Text("Unlocked. Rules can be edited.", style = MaterialTheme.typography.bodyLarge)
-                        Spacer(Modifier.height(14.dp))
-                        PrimaryAction("Turn strict mode off") {
-                            gate.loosen("Switching strict mode off entirely.") { confirmDisable = true }
-                        }
-                        Spacer(Modifier.height(10.dp))
-                        Text(
-                            "RE-ARM NOW",
-                            style = Eyebrow, color = Ink.Brass,
-                            modifier = Modifier.clickable { prefs.enableStrict(cooldown) }
+                            modifier = Modifier.clickable {
+                                gate.requirePin("Cancelling the wait and staying locked.") {
+                                    prefs.cancelUnlockRequest()
+                                }
+                            }
                         )
                     }
                 }
@@ -493,6 +562,57 @@ fun SettingsScreen() {
         )
     }
 
+    if (confirmDaysLock) {
+        val days = lockDays.toIntOrNull() ?: 0
+        val until = System.currentTimeMillis() + days * 24L * 60 * 60 * 1000
+        AlertDialog(
+            onDismissRequest = { confirmDaysLock = false },
+            containerColor = Ink.Surface,
+            title = { Text("Are you sure?", style = MaterialTheme.typography.titleMedium) },
+            text = {
+                Column {
+                    Text(
+                        "You will not be able to loosen any of your settings for $days " +
+                            "day${if (days == 1) "" else "s"}, even if you have your PIN.",
+                        style = MaterialTheme.typography.bodyLarge
+                    )
+                    Spacer(Modifier.height(12.dp))
+                    // The date is the real check on a typo — 7 and 70 look alike
+                    // in a text field, but next Tuesday and next December don't.
+                    Text(
+                        "That's until ${endsOn(until)}.",
+                        style = MaterialTheme.typography.bodyLarge,
+                        color = Ink.Brass
+                    )
+                    Spacer(Modifier.height(12.dp))
+                    Text(
+                        "Adding new blocks still works, and your emergency extensions are " +
+                            "untouched. It's only loosening that's off the table.",
+                        style = MaterialTheme.typography.bodyMedium
+                    )
+                    Spacer(Modifier.height(12.dp))
+                    Text(
+                        "If this is what you want — well done. God bless, and good luck.",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = Ink.Dim
+                    )
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    prefs.enableStrictForDays(days, cooldown)
+                    lockDays = ""
+                    confirmDaysLock = false
+                }) { Text("Yes, arm", color = Ink.Brass) }
+            },
+            dismissButton = {
+                TextButton(onClick = { confirmDaysLock = false }) {
+                    Text("Cancel", color = Ink.Slate)
+                }
+            }
+        )
+    }
+
     if (resetDialog) {
         AlertDialog(
             onDismissRequest = { resetDialog = false },
@@ -520,25 +640,28 @@ fun SettingsScreen() {
         )
     }
 
-    if (confirmDisable) {
+    if (resetDialog) {
         AlertDialog(
-            onDismissRequest = { confirmDisable = false },
+            onDismissRequest = { resetDialog = false },
             containerColor = Ink.Surface,
-            title = { Text("Turn strict mode off?", style = MaterialTheme.typography.titleMedium) },
+            title = { Text("Reset the PIN?", style = MaterialTheme.typography.titleMedium) },
             text = {
                 Text(
-                    "Your rules stay, but nothing stops you changing them on the spot any more.",
+                    "This takes seven days, and it can't be shortened. Nothing unlocks in the " +
+                        "meantime — the wait is what stops this being a way around your own " +
+                        "blocks. You can cancel it at any point.\n\nIf whoever holds your PIN is " +
+                        "reachable, asking them is faster.",
                     style = MaterialTheme.typography.bodyMedium
                 )
             },
             confirmButton = {
-                TextButton(onClick = { prefs.disableStrict(); confirmDisable = false }) {
-                    Text("Turn it off", color = Ink.Rust)
+                TextButton(onClick = { prefs.startPinReset(); resetDialog = false }) {
+                    Text("Start the seven days", color = Ink.Rust)
                 }
             },
             dismissButton = {
-                TextButton(onClick = { confirmDisable = false }) {
-                    Text("Keep it on", color = Ink.Brass)
+                TextButton(onClick = { resetDialog = false }) {
+                    Text("Cancel", color = Ink.Brass)
                 }
             }
         )
@@ -726,6 +849,22 @@ private fun clock(seconds: Long): String {
     val m = (seconds % 3600) / 60
     val s = seconds % 60
     return if (h > 0) "%d:%02d:%02d".format(h, m, s) else "%d:%02d".format(m, s)
+}
+
+/** "Tuesday, 22 September" — a date a typo can't hide behind. */
+private fun endsOn(millis: Long): String =
+    java.text.SimpleDateFormat("EEEE, d MMMM yyyy 'at' h:mma", java.util.Locale.getDefault())
+        .format(java.util.Date(millis))
+
+private fun daysHours(millis: Long): String {
+    val totalHours = millis / 3_600_000L
+    val d = totalHours / 24
+    val h = totalHours % 24
+    return when {
+        d > 0 -> "$d day${if (d == 1L) "" else "s"}, $h hour${if (h == 1L) "" else "s"}"
+        h > 0 -> "$h hour${if (h == 1L) "" else "s"}"
+        else -> "under an hour"
+    }
 }
 
 private fun days(seconds: Long): String {

@@ -12,6 +12,8 @@ import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
@@ -57,12 +59,40 @@ class BlockOverlayActivity : ComponentActivity() {
         val gateLabel = intent.getStringExtra(EXTRA_GATE_LABEL).orEmpty()
         val gateDone = intent.getIntExtra(EXTRA_GATE_DONE, 0)
         val gateNeeded = intent.getIntExtra(EXTRA_GATE_NEEDED, 0)
+        val leftToday = intent.getIntExtra(EXTRA_LEFT_TODAY, 0)
+        val gapSeconds = intent.getIntExtra(EXTRA_GAP_SECONDS, 0)
+        val justEnded = intent.getBooleanExtra(EXTRA_JUST_ENDED, false)
 
         setContent {
             AnchorTheme {
                 val ctx = LocalContext.current
                 val prefs = remember { Prefs.get(ctx) }
                 val verse = remember { Verses.next(ctx) }
+                if (reason == Decision.Reason.SESSION.name) {
+                    SessionScreen(
+                        verse = verse,
+                        label = label,
+                        minutesLeftToday = leftToday,
+                        gapSeconds = gapSeconds,
+                        justEnded = justEnded,
+                        onStart = { mins ->
+                            prefs.startSession(target, mins)
+                            openTarget(target)
+                        },
+                        onOneMore = {
+                            if (leftToday <= 0) {
+                                // The day is spent — this is the one grace minute.
+                                prefs.grantGrace(target)
+                            } else {
+                                prefs.extendSession(target, 1, maxMs = leftToday * 60_000L)
+                            }
+                            openTarget(target)
+                        },
+                        onDismiss = { goHome() }
+                    )
+                    return@AnchorTheme
+                }
+
                 BlockScreen(
                     verse = verse,
                     label = label,
@@ -78,7 +108,7 @@ class BlockOverlayActivity : ComponentActivity() {
                         reason != Decision.Reason.RULE.name,
                     onExtend = {
                         prefs.grantEmergency(target)
-                        goHome()
+                        openTarget(target)
                     },
                     onDismiss = { goHome() },
                     onOpenPassage = { openPassage(verse.book, verse.chapter, verse.verseStart) }
@@ -98,6 +128,25 @@ class BlockOverlayActivity : ComponentActivity() {
             }
         )
         finish()
+    }
+
+    /**
+     * Puts you back where you were once a session is claimed. Without this you
+     * land on the launcher and have to find the app again, which is a daft end
+     * to a decision you just made deliberately.
+     */
+    private fun openTarget(target: String) {
+        val intent = runCatching { packageManager.getLaunchIntentForPackage(target) }.getOrNull()
+        if (intent != null) {
+            intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            startActivity(intent)
+            finish()
+            overridePendingTransition(0, 0)
+        } else {
+            // A website — there's no launch intent, so just get out of the way.
+            finish()
+            overridePendingTransition(0, 0)
+        }
     }
 
     private fun goHome() {
@@ -135,6 +184,9 @@ class BlockOverlayActivity : ComponentActivity() {
         const val EXTRA_LABEL = "label"
         const val EXTRA_REASON = "reason"
         const val EXTRA_TARGET = "target"
+        const val EXTRA_LEFT_TODAY = "left_today"
+        const val EXTRA_GAP_SECONDS = "gap_seconds"
+        const val EXTRA_JUST_ENDED = "just_ended"
         const val EXTRA_GATE_LABEL = "gate_label"
         const val EXTRA_GATE_DONE = "gate_done"
         const val EXTRA_GATE_NEEDED = "gate_needed"
@@ -149,6 +201,41 @@ class BlockOverlayActivity : ComponentActivity() {
          */
         @Volatile var showing: Boolean = false
             private set
+    }
+}
+
+/**
+ * A verse in its own scrolling area, with the controls pinned beneath it.
+ *
+ * Long passages used to run underneath the buttons — Romans 6 would swallow the
+ * countdown and the "read it" link. Giving the text a bounded, scrollable region
+ * means the controls always have their own space no matter how long the verse.
+ */
+@Composable
+private fun VerseBody(
+    verse: BlockVerse,
+    modifier: Modifier = Modifier,
+    large: Boolean = true,
+    onOpenPassage: (() -> Unit)? = null
+) {
+    Column(modifier.verticalScroll(rememberScrollState())) {
+        Text(verse.text, style = if (large) ScriptureLarge else Scripture)
+        Spacer(Modifier.height(20.dp))
+        Row(
+            Modifier
+                .then(if (onOpenPassage != null) Modifier.clickable(onClick = onOpenPassage) else Modifier)
+                .padding(vertical = 4.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Box(Modifier.width(24.dp).height(1.dp).background(Ink.BrassDim))
+            Spacer(Modifier.width(12.dp))
+            Text(verse.reference.uppercase(), style = Eyebrow, color = Ink.Brass)
+            if (onOpenPassage != null) {
+                Spacer(Modifier.width(10.dp))
+                Text("READ IT", style = Eyebrow, color = Ink.Dim)
+            }
+        }
+        Spacer(Modifier.height(8.dp))
     }
 }
 
@@ -167,23 +254,18 @@ private fun BlockScreen(
     onDismiss: () -> Unit,
     onOpenPassage: () -> Unit
 ) {
+    var elapsed by remember { mutableIntStateOf(0) }
+    val done = elapsed >= pauseSeconds
     var extendStep by remember { mutableIntStateOf(0) }
     var extendWait by remember { mutableIntStateOf(60) }
 
+    LaunchedEffect(Unit) {
+        while (elapsed < pauseSeconds) { delay(1_000); elapsed += 1 }
+    }
     LaunchedEffect(extendStep) {
         if (extendStep == 1) {
             extendWait = 60
             while (extendWait > 0) { delay(1_000); extendWait -= 1 }
-        }
-    }
-
-    var elapsed by remember { mutableIntStateOf(0) }
-    val done = elapsed >= pauseSeconds
-
-    LaunchedEffect(Unit) {
-        while (elapsed < pauseSeconds) {
-            delay(1_000)
-            elapsed += 1
         }
     }
 
@@ -193,80 +275,26 @@ private fun BlockScreen(
         label = "pause"
     )
 
-    Box(
+    Column(
         Modifier
             .fillMaxSize()
             .background(Ink.Void)
             .padding(horizontal = 32.dp)
+            .padding(top = 72.dp, bottom = 28.dp)
     ) {
-        Column(
-            Modifier
-                .fillMaxSize()
-                .padding(top = 96.dp, bottom = 120.dp),
-            verticalArrangement = Arrangement.Center
-        ) {
-            Text(headerFor(reason), style = Eyebrow)
-            Spacer(Modifier.height(10.dp))
-            Text(
-                if (reason == Decision.Reason.GATED.name)
-                    "$label opens up after $gateNeeded minutes in $gateLabel. " +
-                        "You've done $gateDone so far today."
-                else subheadFor(reason, label),
-                style = MaterialTheme.typography.bodyMedium,
-                color = Ink.Dim
-            )
+        Text(headerFor(reason), style = Eyebrow)
+        Spacer(Modifier.height(10.dp))
+        Text(
+            if (reason == Decision.Reason.GATED.name)
+                "$label opens up after $gateNeeded minutes in $gateLabel. " +
+                    "You've done $gateDone so far today."
+            else subheadFor(reason, label),
+            style = MaterialTheme.typography.bodyMedium,
+            color = Ink.Dim
+        )
 
-            if (reason == Decision.Reason.GATED.name && gateNeeded > 0) {
-                Spacer(Modifier.height(16.dp))
-                Box(
-                    Modifier
-                        .fillMaxWidth()
-                        .height(2.dp)
-                        .clip(RoundedCornerShape(1.dp))
-                        .background(Ink.Hairline)
-                ) {
-                    Box(
-                        Modifier
-                            .fillMaxWidth((gateDone.toFloat() / gateNeeded).coerceIn(0f, 1f))
-                            .fillMaxHeight()
-                            .background(Ink.BrassDim)
-                    )
-                }
-            }
-
-            Spacer(Modifier.height(48.dp))
-
-            Text(verse.text, style = ScriptureLarge)
-
-            Spacer(Modifier.height(28.dp))
-
-            // The whole Bible is sitting in the app; there should be a way from
-            // the verse to the passage around it.
-            Row(
-                Modifier.clickable { onOpenPassage() },
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Box(
-                    Modifier
-                        .width(24.dp)
-                        .height(1.dp)
-                        .background(Ink.BrassDim)
-                )
-                Spacer(Modifier.width(12.dp))
-                Text(verse.reference.uppercase(), style = Eyebrow, color = Ink.Brass)
-                Spacer(Modifier.width(10.dp))
-                Text("READ IT", style = Eyebrow, color = Ink.Dim)
-            }
-        }
-
-        // The wait, made visible.
-        Column(
-            Modifier
-                .align(Alignment.BottomCenter)
-                .fillMaxWidth()
-                .padding(bottom = 40.dp),
-            horizontalAlignment = Alignment.CenterHorizontally
-        ) {
+        if (reason == Decision.Reason.GATED.name && gateNeeded > 0) {
+            Spacer(Modifier.height(16.dp))
             Box(
                 Modifier
                     .fillMaxWidth()
@@ -276,38 +304,66 @@ private fun BlockScreen(
             ) {
                 Box(
                     Modifier
-                        .fillMaxWidth(progress.coerceIn(0f, 1f))
+                        .fillMaxWidth((gateDone.toFloat() / gateNeeded).coerceIn(0f, 1f))
                         .fillMaxHeight()
-                        .background(
-                            Brush.horizontalGradient(listOf(Ink.BrassDim, Ink.Brass))
-                        )
+                        .background(Ink.BrassDim)
                 )
             }
+        }
 
-            Spacer(Modifier.height(24.dp))
+        Spacer(Modifier.height(28.dp))
 
-            if (done) {
+        VerseBody(
+            verse = verse,
+            modifier = Modifier.weight(1f),
+            onOpenPassage = onOpenPassage
+        )
+
+        Spacer(Modifier.height(20.dp))
+
+        Box(
+            Modifier
+                .fillMaxWidth()
+                .height(2.dp)
+                .clip(RoundedCornerShape(1.dp))
+                .background(Ink.Hairline)
+        ) {
+            Box(
+                Modifier
+                    .fillMaxWidth(progress.coerceIn(0f, 1f))
+                    .fillMaxHeight()
+                    .background(Brush.horizontalGradient(listOf(Ink.BrassDim, Ink.Brass)))
+            )
+        }
+
+        Spacer(Modifier.height(16.dp))
+
+        Column(
+            Modifier.fillMaxWidth(),
+            horizontalAlignment = Alignment.CenterHorizontally
+        ) {
+            if (!done) {
+                Text("${pauseSeconds - elapsed}", style = ScriptureLarge, color = Ink.Dim)
+            } else {
                 TextButton(onClick = onDismiss) {
-                    Text("Go back", style = Eyebrow, color = Ink.Bone)
+                    Text("Leave it", style = Eyebrow, color = Ink.Bone)
                 }
-
                 if (canExtend && emergenciesLeft > 0) {
-                    Spacer(Modifier.height(8.dp))
                     when (extendStep) {
                         0 -> TextButton(onClick = { extendStep = 1 }) {
                             Text(
                                 "I NEED A FEW MINUTES  ·  $emergenciesLeft LEFT THIS WEEK",
-                                style = Eyebrow, color = Ink.Dim
+                                style = Eyebrow, color = Ink.Dim, textAlign = TextAlign.Center
                             )
                         }
-                        1 -> Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                        1 -> {
                             Text(
                                 "Two a week. Worth being sure this is one of them.",
                                 style = MaterialTheme.typography.bodyMedium,
                                 color = Ink.Dim,
                                 textAlign = TextAlign.Center
                             )
-                            Spacer(Modifier.height(12.dp))
+                            Spacer(Modifier.height(8.dp))
                             if (extendWait > 0) {
                                 Text("$extendWait", style = Eyebrow, color = Ink.Dim)
                             } else {
@@ -315,20 +371,171 @@ private fun BlockScreen(
                                     Text("USE ONE NOW", style = Eyebrow, color = Ink.Brass)
                                 }
                             }
-                            Spacer(Modifier.height(4.dp))
                             TextButton(onClick = { extendStep = 0 }) {
                                 Text("NEVER MIND", style = Eyebrow, color = Ink.Slate)
                             }
                         }
                     }
                 }
+            }
+        }
+    }
+}
+
+/**
+ * Shown when a rule asks how long you want before each stretch of use.
+ *
+ * The countdown is the point. Sixty seconds is long enough to break the reflex
+ * that opened the app, and the verse gives you something to do with the wait
+ * other than stare at a timer.
+ */
+@Composable
+private fun SessionScreen(
+    verse: BlockVerse,
+    label: String,
+    minutesLeftToday: Int,
+    gapSeconds: Int,
+    justEnded: Boolean,
+    onStart: (Int) -> Unit,
+    onOneMore: () -> Unit,
+    onDismiss: () -> Unit
+) {
+    var elapsed by remember { mutableIntStateOf(0) }
+    LaunchedEffect(Unit) {
+        while (elapsed < gapSeconds) { delay(1_000); elapsed += 1 }
+    }
+    val waitLeft = (gapSeconds - elapsed).coerceAtLeast(0)
+    val ready = waitLeft <= 0
+    // The escape hatch unlocks sooner — it exists for finishing a video, and
+    // making someone wait a full minute for one more minute is absurd.
+    val oneMoreReady = elapsed >= 10 || gapSeconds <= 10
+
+    val options = remember(minutesLeftToday) {
+        listOf(5, 10, 15, 30).filter { it < minutesLeftToday }
+    }
+    val dayDone = minutesLeftToday <= 0
+    val plural = if (minutesLeftToday == 1) "" else "s"
+    val howMuchLeft = "You've got $minutesLeftToday minute$plural left on $label today."
+
+    Column(
+        Modifier
+            .fillMaxSize()
+            .background(Ink.Void)
+            .padding(horizontal = 32.dp)
+            .padding(top = 72.dp, bottom = 28.dp)
+    ) {
+        Text(
+            when {
+                dayDone -> "TIME'S UP"
+                justEnded -> "THAT STRETCH IS UP"
+                else -> "BEFORE YOU START"
+            },
+            style = Eyebrow
+        )
+        Spacer(Modifier.height(10.dp))
+        Text(
+            when {
+                dayDone ->
+                    "That's today's time on $label gone. If needed, you may have an additional " +
+                        "minute to finish what you were in the middle of."
+                justEnded ->
+                    "$howMuchLeft Wait for the timer if you want another stretch. If needed, you " +
+                        "may have an additional minute to finish what you were in the middle of."
+                options.isEmpty() -> "$howMuchLeft That's all that's left, so it's all or nothing."
+                else -> "$howMuchLeft How much time do you want to spend on it now?"
+            },
+            style = MaterialTheme.typography.bodyLarge
+        )
+
+        Spacer(Modifier.height(28.dp))
+
+        VerseBody(verse = verse, modifier = Modifier.weight(1f), large = false)
+
+        Spacer(Modifier.height(20.dp))
+
+        if (!dayDone) {
+            if (ready) {
+                Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                    options.forEach { m ->
+                        Box(
+                            Modifier
+                                .weight(1f)
+                                .clip(RoundedCornerShape(10.dp))
+                                .background(Ink.Raised)
+                                .clickable { onStart(m) }
+                                .padding(vertical = 16.dp),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Text("$m min", style = Eyebrow, color = Ink.Bone)
+                        }
+                    }
+                    Box(
+                        Modifier
+                            .weight(1f)
+                            .clip(RoundedCornerShape(10.dp))
+                            .background(Ink.Brass)
+                            .clickable { onStart(minutesLeftToday) }
+                            .padding(vertical = 16.dp),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Text(
+                            if (options.isEmpty()) "USE THE LAST $minutesLeftToday"
+                            else "ALL $minutesLeftToday",
+                            style = Eyebrow, color = Ink.Void, textAlign = TextAlign.Center
+                        )
+                    }
+                }
             } else {
+                Box(
+                    Modifier
+                        .fillMaxWidth()
+                        .height(2.dp)
+                        .clip(RoundedCornerShape(1.dp))
+                        .background(Ink.Hairline)
+                ) {
+                    Box(
+                        Modifier
+                            .fillMaxWidth(
+                                if (gapSeconds == 0) 1f
+                                else (elapsed.toFloat() / gapSeconds).coerceIn(0f, 1f)
+                            )
+                            .fillMaxHeight()
+                            .background(Ink.BrassDim)
+                    )
+                }
+                Spacer(Modifier.height(14.dp))
                 Text(
-                    "${pauseSeconds - elapsed}",
+                    "$waitLeft",
                     style = ScriptureLarge,
                     color = Ink.Dim,
+                    modifier = Modifier.fillMaxWidth(),
                     textAlign = TextAlign.Center
                 )
+            }
+            Spacer(Modifier.height(12.dp))
+        }
+
+        Column(
+            Modifier.fillMaxWidth(),
+            horizontalAlignment = Alignment.CenterHorizontally
+        ) {
+            if (justEnded || dayDone) {
+                if (oneMoreReady) {
+                    TextButton(onClick = onOneMore) {
+                        Text(
+                            "I'M IN THE MIDDLE OF SOMETHING — 1 MORE MINUTE",
+                            style = Eyebrow, color = Ink.Brass, textAlign = TextAlign.Center
+                        )
+                    }
+                } else {
+                    Text(
+                        "One more minute available in ${10 - elapsed}",
+                        style = MaterialTheme.typography.bodyMedium, color = Ink.Dim
+                    )
+                }
+            }
+            TextButton(onClick = onDismiss) {
+                Text("LEAVE IT", style = Eyebrow, color = Ink.Slate)
             }
         }
     }

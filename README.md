@@ -10,19 +10,18 @@ instead.
 - **PIN on everything that loosens** — removing a block, stretching a limit, or switching strict
   mode off all ask for it. Adding a block never does
 - **Strict mode** — PIN plus a cooldown, so turning blocking off stops being a snap decision
-- **Optional Uninstall protection** — getting rid of Anchor takes the PIN too
+- **Uninstall protection** — getting rid of Anchor takes the PIN too
 - **Schedules** — block only after 10pm, or only on weekdays, or around the clock
 - **The whole Bible offline** — all 66 books, 31,098 verses, with search. No connection needed
 - **Unlock gates** — Reddit stays shut until you've done ten minutes in your language app
-- **Emergency extensions** — a couple a week, no PIN needed, for when time runs out mid-conversation on instagram, for example.
+- **Ask how long each time** — portions your daily allowance out instead of handing it over in one go
+- **Emergency extensions** — a couple a week, no PIN needed, for when time runs out mid-conversation
 - **Time warnings** — a quiet heads-up before an allowance ends
 - **Tap a verse reference** on the block screen to read the passage it came from
 
 Everything stays on your phone. No account, no sync, no ads, nothing uploaded.
 
 Scripture is the World English Bible, which is public domain, so there's nothing to license.
-
-Android only. This won't work on an iPhone or iPad - sorry.
 
 ---
 

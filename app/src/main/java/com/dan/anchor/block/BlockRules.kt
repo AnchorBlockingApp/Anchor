@@ -14,10 +14,16 @@ sealed class Decision {
         val gateDone: Int = 0,
         val gateNeeded: Int = 0,
         /** The rule's own target, so the block screen can offer an extension. */
-        val target: String = ""
+        val target: String = "",
+        /** Minutes of today's allowance still unspent, for the session picker. */
+        val minutesLeftToday: Int = 0,
+        /** Seconds until another session may be claimed. */
+        val gapSeconds: Int = 0,
+        /** Whether a session just ended, so "one more minute" makes sense. */
+        val justEnded: Boolean = false
     ) : Decision()
 
-    enum class Reason { RULE, LIMIT_REACHED, ADULT, SELF_DEFENCE, GATED }
+    enum class Reason { RULE, LIMIT_REACHED, ADULT, SELF_DEFENCE, GATED, SESSION }
 }
 
 object BlockRules {
@@ -121,6 +127,13 @@ object BlockRules {
     /**
      * Decide what to do about a foreground app.
      */
+    /** Evaluates any rule by target, whether it's an app or a site. */
+    fun evaluateTarget(context: Context, target: String): Decision {
+        val prefs = Prefs.get(context)
+        val rule = prefs.rules.value.firstOrNull { it.target == target } ?: return Decision.Allow
+        return verdictFor(prefs, rule)
+    }
+
     fun evaluateApp(context: Context, pkg: String): Decision {
         val prefs = Prefs.get(context)
 
@@ -202,6 +215,9 @@ object BlockRules {
         // gate and the daily limit for as long as it runs.
         if (prefs.emergencyActive(rule.target)) return Decision.Allow
 
+        // The one grace minute, if it's running.
+        if (prefs.graceActive(rule.target)) return Decision.Allow
+
         // The gate comes before the allowance: the good thing has to happen
         // first, and doing more of it never buys extra time here.
         if (rule.hasGate && !rule.isHardBlock) {
@@ -221,12 +237,45 @@ object BlockRules {
         if (rule.isHardBlock) {
             return Decision.Block(rule.publicLabel, Decision.Reason.RULE, target = rule.target)
         }
-        val used = prefs.usedMinutes(rule.target)
-        return if (used >= rule.limitMinutes) {
-            Decision.Block(rule.publicLabel, Decision.Reason.LIMIT_REACHED, target = rule.target)
-        } else {
-            Decision.Allow
+        // Work in millis. Rounding minutes down meant six seconds of allowance
+        // read as "a minute left", and an extension could then overrun the day.
+        val usedMs = prefs.usedMillis(rule.target)
+        val limitMs = rule.limitMinutes * 60_000L
+        val msLeft = limitMs - usedMs
+        // Under a minute left is not worth claiming a stretch over.
+        if (msLeft < 60_000L) {
+            // Offer the single grace minute first, once a day, so the day
+            // doesn't end mid-sentence. After that it's simply over.
+            if (rule.askEachTime && !prefs.graceUsed(rule.target)) {
+                return Decision.Block(
+                    label = rule.publicLabel,
+                    reason = Decision.Reason.SESSION,
+                    target = rule.target,
+                    minutesLeftToday = 0,
+                    gapSeconds = 0,
+                    justEnded = true
+                )
+            }
+            return Decision.Block(rule.publicLabel, Decision.Reason.LIMIT_REACHED, target = rule.target)
         }
+        // Whole allowance at once unless this rule asks each time.
+        if (!rule.askEachTime) return Decision.Allow
+
+        // A stretch is measured in time actually spent in the app, so stepping
+        // away pauses it rather than running it down behind your back.
+        if (prefs.sessionActive(rule.target)) return Decision.Allow
+
+        val spent = prefs.sessionSpent(rule.target)
+        if (spent) prefs.endSession(rule.target)
+
+        return Decision.Block(
+            label = rule.publicLabel,
+            reason = Decision.Reason.SESSION,
+            target = rule.target,
+            minutesLeftToday = (msLeft / 60_000L).toInt().coerceAtLeast(1),
+            gapSeconds = (prefs.sessionGapRemaining(rule.target) / 1000L).toInt(),
+            justEnded = spent
+        )
     }
 
     fun isBrowser(pkg: String) = BROWSERS.containsKey(pkg)

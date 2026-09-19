@@ -54,6 +54,7 @@ class BlockerService : AccessibilityService() {
     private var cachedAt: Long = 0L
 
     @Volatile private var lastContentCheck: Long = 0L
+    private var lastLeavePage: Long = 0L
     private var lastUsageWrite: Long = 0L
     private var lastBlockedKey: String = ""
     private var lastBlockAt: Long = 0L
@@ -142,7 +143,16 @@ class BlockerService : AccessibilityService() {
             is Decision.Block -> {
                 Watch.decision("blocked ${BlockRules.host(url)}")
                 stopTracking()
-                fire(d, key = "url:${BlockRules.host(url)}")
+                if (d.reason == Decision.Reason.SESSION) {
+                    // A picker, not a refusal — leave the page where it is.
+                    fire(d, key = "url:${BlockRules.host(url)}")
+                } else {
+                    // Off the page first, then the verse. Reopening the browser
+                    // otherwise lands straight back on the blocked page and
+                    // blocks again, making the browser unusable for anything.
+                    leaveBlockedPage()
+                    handler.postDelayed({ fire(d, key = "url:${BlockRules.host(url)}") }, 350L)
+                }
             }
             Decision.Allow -> {
                 Watch.decision("allowed ${BlockRules.host(url)}")
@@ -236,6 +246,25 @@ class BlockerService : AccessibilityService() {
         return hostPart.contains('.') && hostPart.length >= 4
     }
 
+    /**
+     * Navigates the browser off the blocked page.
+     *
+     * An earlier version tried opening a blank tab with a data: URL. Chrome has
+     * blocked data: navigation from external intents for years, so it silently
+     * did nothing. A back action doesn't depend on the browser honouring any
+     * URL scheme, which is why it's used instead.
+     *
+     * Timing matters: this has to happen while the browser is still in front and
+     * before the block screen exists, or the back lands on the verse and
+     * dismisses it instead.
+     */
+    private fun leaveBlockedPage() {
+        val now = System.currentTimeMillis()
+        if (now - lastLeavePage < 5_000L) return
+        lastLeavePage = now
+        runCatching { performGlobalAction(GLOBAL_ACTION_BACK) }
+    }
+
     // ---------- strict-mode self defence ----------
 
     private fun guardSettings(pkg: String): Boolean {
@@ -322,9 +351,31 @@ class BlockerService : AccessibilityService() {
 
     /** What's genuinely in front right now, ignoring the shade and the keyboard. */
     private fun foregroundPackage(): String? {
+        // An event in the last second already told us what's in front. Asking
+        // the system again is a call into another process for no new answer.
+        if (System.currentTimeMillis() - Watch.lastEventAt < 1_200L &&
+            currentPkg.isNotBlank() && !isOverlayPackage(currentPkg)
+        ) {
+            return currentPkg
+        }
         val live = runCatching { rootInActiveWindow?.packageName?.toString() }.getOrNull()
         if (live != null && !isOverlayPackage(live)) return live
         return currentPkg.takeIf { it.isNotBlank() && !isOverlayPackage(it) }
+    }
+
+    /**
+     * How soon to look again.
+     *
+     * Most of the time you're in something with no rule attached, and checking
+     * that four times as often changes nothing. Events still fire instantly, so
+     * backing off here costs no responsiveness where it matters.
+     */
+    private fun nextTickDelay(fg: String?): Long {
+        if (fg == null) return SLOW_TICK_MS
+        if (BlockRules.isBrowser(fg)) return FAST_TICK_MS
+        if (currentTrackedTarget != null) return FAST_TICK_MS
+        val watched = prefs.rules.value.any { it.target == fg || it.gateApp == fg }
+        return if (watched) FAST_TICK_MS else SLOW_TICK_MS
     }
 
     /**
@@ -335,9 +386,11 @@ class BlockerService : AccessibilityService() {
      */
     private val ticker = object : Runnable {
         override fun run() {
+            var delay = SLOW_TICK_MS
             val awake = runCatching { power.isInteractive }.getOrDefault(true)
             if (awake && ::prefs.isInitialized && !BlockOverlayActivity.showing) {
                 val fg = foregroundPackage()
+                delay = nextTickDelay(fg)
 
                 if (fg != null) {
                     if (fg != currentPkg) {
@@ -359,18 +412,29 @@ class BlockerService : AccessibilityService() {
                     }
                 }
 
+                checkSessionExpiry()
                 checkWarnings()
 
                 // Has an allowance run out mid-session?
                 val t = currentTrackedTarget
                 if (t != null) {
                     val rule = prefs.rules.value.firstOrNull { it.target == t }
-                    if (rule != null && !rule.isHardBlock &&
+                    // An extension has to be honoured here too. Without this the
+                    // poll re-blocks a second after one is granted, and the app
+                    // is unusable despite having just spent one.
+                    val extended = prefs.emergencyActive(t)
+                    if (rule != null && !rule.isHardBlock && !extended &&
                         usedMillisIncludingSession(t) >= rule.limitMinutes * 60_000L
                     ) {
                         stopTracking()
                         fire(
-                            Decision.Block(rule.publicLabel, Decision.Reason.LIMIT_REACHED),
+                            // The target must travel with the block, or the screen
+                            // can't offer an extension and there's no way forward.
+                            Decision.Block(
+                                rule.publicLabel,
+                                Decision.Reason.LIMIT_REACHED,
+                                target = t
+                            ),
                             key = "limit:$t"
                         )
                     } else {
@@ -378,7 +442,44 @@ class BlockerService : AccessibilityService() {
                     }
                 }
             }
-            if (running) handler.postDelayed(this, 1_000L)
+            if (running) handler.postDelayed(this, delay)
+        }
+    }
+
+    /**
+     * Ends a session the moment its minutes are up, rather than waiting for the
+     * next time the app is opened.
+     */
+    private fun checkSessionExpiry() {
+        val t = currentTrackedTarget ?: return
+        val rule = prefs.rules.value.firstOrNull { it.target == t } ?: return
+        if (!rule.askEachTime || rule.isHardBlock) return
+        if (prefs.emergencyActive(t)) return
+
+        // Uses the live figure, including time not yet written to storage, so a
+        // stretch ends on the minute rather than up to fifteen seconds late.
+        val live = usedMillisIncludingSession(t)
+        if (prefs.graceActive(t, live)) return
+        if (prefs.sessionSpent(t, live)) {
+            prefs.endSession(t)
+            stopTracking()
+            flushUsage(force = true)
+            // Re-evaluate rather than computing the numbers here — rounding
+            // minutes locally once reported "1 minute left" with seconds to go.
+            when (val d = BlockRules.evaluateTarget(this, t)) {
+                is Decision.Block -> fire(d, key = "session:$t")
+                Decision.Allow -> fire(
+                    Decision.Block(
+                        label = rule.publicLabel,
+                        reason = Decision.Reason.SESSION,
+                        target = t,
+                        minutesLeftToday = 1,
+                        gapSeconds = (Prefs.SESSION_GAP_MS / 1000L).toInt(),
+                        justEnded = true
+                    ),
+                    key = "session:$t"
+                )
+            }
         }
     }
 
@@ -431,10 +532,10 @@ class BlockerService : AccessibilityService() {
 
         prefs.blockCount += 1
 
-        // Background the blocked app before the verse appears, so it isn't
-        // sitting one back-swipe away.
-        runCatching { performGlobalAction(GLOBAL_ACTION_HOME) }
-
+        // Do NOT send the user home here. Android treats a home action as the
+        // user leaving, which fires onUserLeaveHint on the block screen and
+        // finishes it before it can be read — the verse never appears. The app
+        // gets backgrounded when the block screen is dismissed instead.
         val i = Intent(this, BlockOverlayActivity::class.java).apply {
             addFlags(
                 Intent.FLAG_ACTIVITY_NEW_TASK or
@@ -447,6 +548,9 @@ class BlockerService : AccessibilityService() {
             putExtra(BlockOverlayActivity.EXTRA_GATE_LABEL, decision.gateLabel)
             putExtra(BlockOverlayActivity.EXTRA_GATE_DONE, decision.gateDone)
             putExtra(BlockOverlayActivity.EXTRA_GATE_NEEDED, decision.gateNeeded)
+            putExtra(BlockOverlayActivity.EXTRA_LEFT_TODAY, decision.minutesLeftToday)
+            putExtra(BlockOverlayActivity.EXTRA_GAP_SECONDS, decision.gapSeconds)
+            putExtra(BlockOverlayActivity.EXTRA_JUST_ENDED, decision.justEnded)
         }
         startActivity(i)
     }
@@ -454,5 +558,9 @@ class BlockerService : AccessibilityService() {
     companion object {
         @Volatile var running: Boolean = false
             private set
+
+        private const val FAST_TICK_MS = 1_000L
+        private const val SLOW_TICK_MS = 3_000L
+
     }
 }

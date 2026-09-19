@@ -91,6 +91,12 @@ data class Rule(
      * gate app never earns extra minutes here. The good thing just has to come
      * first. That caps the payoff, so there's nothing to game.
      */
+    /**
+     * Ask how long you want before each stretch of use, instead of handing over
+     * the whole daily allowance at once. Feedback was that people burn the lot
+     * in one sitting; portioning it is the fix.
+     */
+    val askEachTime: Boolean = false,
     val gateApp: String? = null,
     val gateLabel: String = "",
     val gateMinutes: Int = 0
@@ -131,6 +137,7 @@ class Prefs private constructor(context: Context) {
                     isApp = o.getBoolean("isApp"),
                     limitMinutes = o.optInt("limitMinutes", 0),
                     hidden = o.optBoolean("hidden", false),
+                    askEachTime = o.optBoolean("askEachTime", false),
                     gateApp = o.optString("gateApp", "").takeIf { g -> g.isNotBlank() },
                     gateLabel = o.optString("gateLabel", ""),
                     gateMinutes = o.optInt("gateMinutes", 0),
@@ -159,6 +166,7 @@ class Prefs private constructor(context: Context) {
                     .put("isApp", it.isApp)
                     .put("limitMinutes", it.limitMinutes)
                     .put("hidden", it.hidden)
+                    .put("askEachTime", it.askEachTime)
                     .put("gateApp", it.gateApp ?: "")
                     .put("gateLabel", it.gateLabel)
                     .put("gateMinutes", it.gateMinutes)
@@ -253,6 +261,31 @@ class Prefs private constructor(context: Context) {
      * rules or turn blocking off on impulse — you have to request a change,
      * wait out the cooldown, and still be sure about it when the timer expires.
      */
+    /**
+     * Arms strict mode until a fixed date, with no way to shorten it.
+     *
+     * Unlike the cooldown, the PIN does not open this. It exists for a stretch
+     * someone knows will be hard — a weekend, a week — where the point is that
+     * their later self has no say in it.
+     */
+    fun enableStrictForDays(days: Int, cooldownMinutes: Int) {
+        val capped = days.coerceIn(1, MAX_LOCK_DAYS)
+        sp.edit()
+            .putBoolean(KEY_STRICT, true)
+            .putInt(KEY_COOLDOWN, cooldownMinutes)
+            .putLong(KEY_STRICT_UNTIL, System.currentTimeMillis() + capped * 24L * 60 * 60 * 1000)
+            .remove(KEY_UNLOCK_AT)
+            .apply()
+        _strict.value = true
+    }
+
+    fun strictUntil(): Long = sp.getLong(KEY_STRICT_UNTIL, 0L)
+
+    fun daysLockActive(): Boolean = System.currentTimeMillis() < strictUntil()
+
+    /** Millis remaining on the days lock, or 0 if none is running. */
+    fun daysLockRemaining(): Long = (strictUntil() - System.currentTimeMillis()).coerceAtLeast(0L)
+
     fun enableStrict(cooldownMinutes: Int) {
         sp.edit()
             .putBoolean(KEY_STRICT, true)
@@ -281,14 +314,40 @@ class Prefs private constructor(context: Context) {
     fun unlockAt(): Long = sp.getLong(KEY_UNLOCK_AT, 0L)
 
     fun isEditable(): Boolean {
+        // A days lock outranks everything. It is the one state the PIN cannot
+        // shorten, which is the whole reason someone would choose it.
+        if (daysLockActive()) {
+            return false
+        }
+        // A days lock that has run its course ends strict mode outright.
+        if (strictUntil() > 0L) {
+            disableStrictInternal()
+            return true
+        }
         if (!_strict.value) return true
         val at = unlockAt()
-        return at > 0L && System.currentTimeMillis() >= at
+        if (at <= 0L) return false
+        if (System.currentTimeMillis() < at) return false
+        // The wait is the price, and it's been paid. Strict mode switches itself
+        // off rather than leaving a banner and a button to press.
+        disableStrictInternal()
+        return true
     }
 
-    fun disableStrict() {
-        sp.edit().putBoolean(KEY_STRICT, false).remove(KEY_UNLOCK_AT).apply()
+    private fun disableStrictInternal() {
+        sp.edit()
+            .putBoolean(KEY_STRICT, false)
+            .remove(KEY_UNLOCK_AT)
+            .remove(KEY_STRICT_UNTIL)
+            .apply()
         _strict.value = false
+    }
+
+    /** Refused while a days lock is running — that's the point of it. */
+    fun disableStrict(): Boolean {
+        if (daysLockActive()) return false
+        disableStrictInternal()
+        return true
     }
 
     /**
@@ -340,11 +399,118 @@ class Prefs private constructor(context: Context) {
         lastPrunedDay = today
         val prefixToday = "usage_${today}_"
         val stale = sp.all.keys.filter {
-            (it.startsWith("usage_") || it.startsWith("warn_") || it.startsWith("emgend_")) &&
+            (it.startsWith("usage_") || it.startsWith("warn_") || it.startsWith("emgend_") ||
+                it.startsWith("sessall_") || it.startsWith("sessbase_") ||
+                it.startsWith("grace_") || it.startsWith("gracebase_") ||
+                it.startsWith("sessgap_")) &&
                 !it.contains(today)
         }
         if (stale.isEmpty()) return
         sp.edit().apply { stale.forEach { remove(it) } }.apply()
+    }
+
+    // ---------- sessions ----------
+
+    /**
+     * A session is a portion of the daily allowance you've deliberately claimed.
+     * When it ends there's a short wait before another can start — without that
+     * gap, portioning is just extra taps on the way to the same binge.
+     */
+    private fun sessionAllowanceKey(t: String) = "sessall_${today()}_$t"
+    private fun sessionBaselineKey(t: String) = "sessbase_${today()}_$t"
+    private fun sessionGapKey(t: String) = "sessgap_${today()}_$t"
+
+    /** Millis of use claimed for the current stretch. Zero means no session. */
+    fun sessionAllowanceMs(target: String): Long = sp.getLong(sessionAllowanceKey(target), 0L)
+
+    /** Where the daily counter stood when the stretch began. */
+    private fun sessionBaselineMs(target: String): Long = sp.getLong(sessionBaselineKey(target), 0L)
+
+    /**
+     * How much of the stretch has been spent, measured against time actually in
+     * the app rather than the wall clock. Pass [liveUsedMs] when you have a
+     * more current figure than the banked one.
+     */
+    fun sessionUsedMs(target: String, liveUsedMs: Long = usedMillis(target)): Long =
+        (liveUsedMs - sessionBaselineMs(target)).coerceAtLeast(0L)
+
+    fun sessionRemainingMs(target: String, liveUsedMs: Long = usedMillis(target)): Long =
+        (sessionAllowanceMs(target) - sessionUsedMs(target, liveUsedMs)).coerceAtLeast(0L)
+
+    fun sessionActive(target: String, liveUsedMs: Long = usedMillis(target)): Boolean =
+        sessionAllowanceMs(target) > 0L && sessionRemainingMs(target, liveUsedMs) > 0L
+
+    /** True once a stretch has been claimed and spent, before a new one starts. */
+    fun sessionSpent(target: String, liveUsedMs: Long = usedMillis(target)): Boolean =
+        sessionAllowanceMs(target) > 0L && sessionRemainingMs(target, liveUsedMs) <= 0L
+
+    /** Claim [minutes] of the remaining daily allowance for this stretch. */
+    fun startSession(target: String, minutes: Int) {
+        sp.edit()
+            .putLong(sessionAllowanceKey(target), minutes * 60_000L)
+            .putLong(sessionBaselineKey(target), usedMillis(target))
+            .remove(sessionGapKey(target))
+            .apply()
+    }
+
+    /**
+     * Adds [minutes] of use onto the current stretch, for finishing something.
+     *
+     * The baseline has to move to where the counter stands now. A stretch that
+     * has already ended has had its baseline cleared, so without this the extra
+     * minute gets measured against the whole day's usage and is spent the
+     * instant it's granted — which loops straight back to the block screen.
+     *
+     * Usage is accurate at this point because ending a stretch forces a flush
+     * before the screen appears.
+     */
+    fun extendSession(target: String, minutes: Int = 1, maxMs: Long = Long.MAX_VALUE) {
+        val used = usedMillis(target)
+        val leftover = sessionRemainingMs(target, used)
+        // Never hand out more than is left in the day — an extension is meant to
+        // let you finish something, not to quietly exceed your own limit.
+        val granted = (leftover + minutes * 60_000L).coerceAtMost(maxMs.coerceAtLeast(0L))
+        sp.edit()
+            .putLong(sessionAllowanceKey(target), granted)
+            .putLong(sessionBaselineKey(target), used)
+            .remove(sessionGapKey(target))
+            .apply()
+    }
+
+    fun endSession(target: String) {
+        sp.edit()
+            .remove(sessionAllowanceKey(target))
+            .remove(sessionBaselineKey(target))
+            .putLong(sessionGapKey(target), System.currentTimeMillis() + SESSION_GAP_MS)
+            .apply()
+    }
+
+    /** Millis until another stretch may be claimed. Zero means now. */
+    fun sessionGapRemaining(target: String): Long =
+        (sp.getLong(sessionGapKey(target), 0L) - System.currentTimeMillis()).coerceAtLeast(0L)
+
+    // ---------- the last minute ----------
+
+    /**
+     * One minute past the daily limit, offered once a day, to finish whatever
+     * you were in the middle of. After that the day really is done.
+     */
+    private fun graceKey(t: String) = "grace_${today()}_$t"
+    private fun graceBaseKey(t: String) = "gracebase_${today()}_$t"
+
+    fun graceUsed(target: String): Boolean = sp.getBoolean(graceKey(target), false)
+
+    fun grantGrace(target: String) {
+        sp.edit()
+            .putBoolean(graceKey(target), true)
+            .putLong(graceBaseKey(target), usedMillis(target))
+            .apply()
+    }
+
+    fun graceActive(target: String, liveUsedMs: Long = usedMillis(target)): Boolean {
+        if (!graceUsed(target)) return false
+        val base = sp.getLong(graceBaseKey(target), 0L)
+        return (liveUsedMs - base) < 60_000L
     }
 
     // ---------- emergency extensions ----------
@@ -462,6 +628,7 @@ class Prefs private constructor(context: Context) {
         private const val KEY_PIN_SALT = "pin_salt"
         private const val KEY_STRICT = "strict"
         private const val KEY_COOLDOWN = "cooldown"
+        private const val KEY_STRICT_UNTIL = "strict_until"
         private const val KEY_UNLOCK_AT = "unlock_at"
         private const val KEY_LAST_VERSE = "last_verse"
         private const val KEY_PAUSE = "pause_seconds"
@@ -472,6 +639,12 @@ class Prefs private constructor(context: Context) {
         private const val KEY_EMERGENCY_MINUTES = "emergency_minutes"
         private const val KEY_WARNINGS = "warnings_on"
         private const val KEY_PIN_RESET_AT = "pin_reset_at"
+
+        /** Long enough to break the reflex, short enough not to strand anyone. */
+        const val SESSION_GAP_MS = 60_000L
+
+        /** Upper bound on a days lock. Long enough for any real commitment. */
+        const val MAX_LOCK_DAYS = 365
 
         @Volatile private var instance: Prefs? = null
 

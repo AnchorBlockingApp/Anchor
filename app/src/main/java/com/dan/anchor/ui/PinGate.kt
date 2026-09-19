@@ -31,6 +31,22 @@ class PinGate internal constructor(
     /**
      * @param reason shown in the dialog so you know what you're unlocking.
      */
+    /**
+     * For the one action that must work *while* strict mode is armed: starting
+     * the cooldown itself.
+     *
+     * Routing this through [loosen] created a deadlock — the button that begins
+     * the wait was refused because the wait hadn't begun. It still costs the
+     * PIN; it just doesn't ask the clock for permission to start the clock.
+     */
+    fun requirePin(reason: String, action: () -> Unit) {
+        if (!prefs.hasPin) {
+            action()
+            return
+        }
+        show(Pending(reason, action))
+    }
+
     fun loosen(reason: String, action: () -> Unit) {
         // Strict mode's cooldown comes first — no PIN gets you past a running clock.
         if (prefs.strictMode.value && !prefs.isEditable()) {
@@ -68,10 +84,17 @@ fun rememberPinGate(): PinGate {
                 title = { Text("Still locked", style = MaterialTheme.typography.titleMedium) },
                 text = {
                     Text(
-                        if (prefs.unlockAt() > 0)
-                            "The cooldown is still running. Nothing opens until it finishes — not even with the PIN."
-                        else
-                            "Strict mode is armed. Start the cooldown in Settings, then come back when it's done.",
+                        when {
+                            prefs.daysLockActive() ->
+                                "Strict mode is locked for a set number of days. Nothing loosens " +
+                                    "until it's over — that's what you chose it for."
+                            prefs.unlockAt() > 0 ->
+                                "The cooldown is still running. Nothing opens until it finishes — " +
+                                    "not even with the PIN."
+                            else ->
+                                "Strict mode is armed. Start the cooldown in Settings — it needs no " +
+                                    "PIN — then come back when it's done."
+                        },
                         style = MaterialTheme.typography.bodyMedium
                     )
                 },
